@@ -70,3 +70,17 @@ The Garden scene area for completed and failed Session Characters. It shows a bo
 
 **Sensitive Content Masking**:
 Best-effort redaction of credential-like values, including common API keys, tokens, passwords, secrets, private keys, environment variables, and credential fields, before raw observed content is shown in the UI.
+
+## Delivery Boundary
+
+**Garden Server**:
+The local process boundary that observes OpenCode and publishes a Project's Session Projections to the Browser Client. It is owned by the Garden CLI for its lifetime and is distinct from an OpenCode server.
+
+**Browser Client**:
+The read-only visual client for a Project's Session Projections. It does not connect to OpenCode or issue commands that mutate Sessions.
+
+**Projection Snapshot**:
+A point-in-time collection of the Project's currently visible Session Projections.
+
+**Projection Update**:
+A complete Session Projection published when the Garden Server observes a change. It is an update to the current view, not a replayable Event or durable history record.
