@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { listen } from "./port.js";
 import type { OpenCodeAdapter } from "./opencode.js";
-import { mask } from "./projection.js";
+import { mask, type SessionProjection } from "./projection.js";
 
 export type GardenServerOptions = { projectRoot: string; port?: number; clientFile?: string; adapter?: OpenCodeAdapter };
 
@@ -68,10 +68,11 @@ export class GardenServer {
       request.on("close", () => { this.eventClients.delete(response); response.end(); });
       return;
     }
-    if (request.method === "GET" && url.pathname === "/") {
+    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/projection.js")) {
       try {
-        const client = await readFile(this.clientFile, "utf8");
-        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        const file = url.pathname === "/" ? this.clientFile : path.join(path.dirname(this.clientFile), "projection.js");
+        const client = await readFile(file, "utf8");
+        response.writeHead(200, { "Content-Type": url.pathname === "/" ? "text/html; charset=utf-8" : "text/javascript; charset=utf-8" });
         response.end(client);
       } catch { this.json(response, 404, { error: "Browser Client is not built" }); }
       return;
@@ -82,6 +83,11 @@ export class GardenServer {
   publishSnapshot(): void {
     const snapshot = { schemaVersion: 1, project: { root: this.projectRoot }, sessions: (this.adapter?.snapshot ?? []).map(({ rawContent: _rawContent, ...session }) => session) };
     for (const client of this.eventClients) client.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
+  }
+
+  publishUpdate(session: SessionProjection): void {
+    const { rawContent: _rawContent, ...safeSession } = session;
+    for (const client of this.eventClients) client.write(`event: update\ndata: ${JSON.stringify(safeSession)}\n\n`);
   }
 
   private json(response: ServerResponse, status: number, body: unknown): void {

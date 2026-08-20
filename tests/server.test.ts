@@ -36,6 +36,24 @@ test("shutdown releases a Garden-owned server", async () => {
   await assert.rejects(fetch(`${url}/api/health`));
 });
 
+test("publishes complete session projection updates over SSE", async () => {
+  const adapter = { snapshot: [session] } as never;
+  const server = new GardenServer({ projectRoot: "/tmp/project", adapter });
+  await server.start();
+  try {
+    const stream = await fetch(`${server.url}/api/events`);
+    const reader = stream.body?.getReader();
+    assert.ok(reader);
+    await reader.read();
+    server.publishUpdate({ ...session, status: { ...session.status, primary: "waiting_for_user" } });
+    const chunk = await reader.read();
+    const text = new TextDecoder().decode(chunk.value);
+    assert.match(text, /event: update/);
+    assert.match(text, /waiting_for_user/);
+    await reader.cancel();
+  } finally { await server.stop(); }
+});
+
 test("session detail is masked and raw content requires an explicit expansion request", async () => {
   const adapter = { snapshot: [session] } as never;
   const server = new GardenServer({ projectRoot: "/tmp/project", adapter });
