@@ -17,7 +17,15 @@ test("selects an available loopback port and reports health", async () => {
     assert.notEqual(server.port, 0);
     assert.equal(new URL(server.url).hostname, "127.0.0.1");
     const response = await fetch(`${server.url}/api/health`);
-    assert.deepEqual(await response.json(), { ready: true, server: "ready", reconciliation: "disconnected", adapter: "disconnected" });
+    assert.deepEqual(await response.json(), { ready: false, server: "ready", state: "disconnected", message: null, reconciliation: "disconnected", adapter: "disconnected" });
+  } finally { await server.stop(); }
+});
+
+test("reports actionable operational failures through health", async () => {
+  const server = new GardenServer({ projectRoot: "/tmp/project", operationalState: "unsupported_version", operationalMessage: "OpenCode 1.19.0 is unsupported" });
+  await server.start();
+  try {
+    assert.deepEqual(await fetch(`${server.url}/api/health`).then((response) => response.json()), { ready: false, server: "ready", state: "unsupported_version", message: "OpenCode 1.19.0 is unsupported", reconciliation: "disconnected", adapter: "disconnected" });
   } finally { await server.stop(); }
 });
 
