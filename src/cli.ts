@@ -30,17 +30,19 @@ export function parseArgs(argv: string[]): Args {
 export async function run(argv = process.argv.slice(2), output = console.log): Promise<() => Promise<void>> {
   const args = parseArgs(argv);
   const root = await detectProjectRoot(args.directory);
-  const adapter = new OpenCodeAdapter({ projectRoot: root, baseUrl: args.opencodeUrl });
+  let server: GardenServer | undefined;
+  const adapter = new OpenCodeAdapter({ projectRoot: root, baseUrl: args.opencodeUrl, onProjectionUpdate: () => server?.publishSnapshot() });
   try { await adapter.connect(); } catch { await adapter.startOwned(); }
-  const server = new GardenServer({ projectRoot: root, port: args.port, adapter, clientFile: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "client", "index.html") });
+  server = new GardenServer({ projectRoot: root, port: args.port, adapter, clientFile: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "client", "index.html") });
   await server.start();
+  const refresh = setInterval(() => { void adapter.reconcile().catch(() => adapter.markStale()); }, 1000);
   output(`Agent Session Garden serving ${server.url} for ${root}`);
   if (args.open) {
     const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
     const { spawn } = await import("node:child_process");
     spawn(command, [server.url], { detached: true, stdio: "ignore" }).unref();
   }
-  return async () => { await server.stop(); await adapter.stop(); };
+  return async () => { clearInterval(refresh); await server?.stop(); await adapter.stop(); };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
