@@ -1,0 +1,8 @@
+{
+  "id": "session-123456789",
+  "directory": "/workspace/project",
+  "title": "Implement observer",
+  "agent": "build",
+  "model": { "provider": "Anthropic", "id": "Claude-Sonnet" },
+  "createdAt": "2026-08-20T00:00:00.000Z"
+}

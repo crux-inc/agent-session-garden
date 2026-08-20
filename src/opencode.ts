@@ -117,9 +117,22 @@ export class OpenCodeAdapter {
     try {
       const sessions = await this.get("/session");
       const list = Array.isArray(sessions) ? sessions : Array.isArray(sessions?.sessions) ? sessions.sessions : [];
+      const statuses = await this.get("/session/status");
       const next = new Map<string, SessionProjection>();
       for (const session of list) {
-        const projection = projectSession(session, this.projectRoot, { status: session.status });
+        const id = session?.id ?? session?.sessionID;
+        if (typeof id !== "string" || id.trim().length === 0) continue;
+        const detail = await this.get(`/session/${encodeURIComponent(id)}`);
+        const messages = await this.get(`/session/${encodeURIComponent(id)}/message`);
+        const contradictoryIdentity = detail?.id !== id && detail?.sessionID !== id;
+        const authoritative = contradictoryIdentity ? { ...session } : { ...session, ...(detail && typeof detail === "object" ? detail : {}), id };
+        const statusResult = statusFor(statuses, id);
+        const observed = {
+          ...observationFromMessages(messages),
+          status: statusResult.value,
+          invalid: contradictoryIdentity || statusResult.malformed
+        };
+        const projection = projectSession(authoritative, this.projectRoot, observed);
         if (projection) next.set(projection.sessionId, projection);
       }
       if (sequence !== this.refreshSequence || this.stopped) return;
@@ -265,4 +278,30 @@ export class OpenCodeAdapter {
     if (!response.ok) throw new Error(`OpenCode GET ${path} failed with HTTP ${response.status}`);
     return response.json();
   }
+
+}
+
+function statusFor(statuses: any, id: string): { value?: string; present: boolean; malformed: boolean } {
+  const entry = Array.isArray(statuses)
+    ? statuses.find((item) => item?.id === id || item?.sessionID === id)
+    : statuses && typeof statuses === "object" ? statuses[id] : undefined;
+  if (entry === undefined) return { present: false, malformed: false };
+  const value = normalizeStatus(entry);
+  return { value, present: true, malformed: value === undefined };
+}
+
+function normalizeStatus(status: any): string | undefined {
+  if (typeof status === "string") return status;
+  if (!status || typeof status !== "object") return undefined;
+  return typeof status.status === "string" ? status.status : typeof status.type === "string" ? status.type : undefined;
+}
+
+function observationFromMessages(messages: any): Record<string, unknown> {
+  const list = Array.isArray(messages) ? messages : Array.isArray(messages?.messages) ? messages.messages : [];
+  const parts = list.flatMap((message: any) => Array.isArray(message?.parts) ? message.parts : message?.part ? [message.part] : []);
+  const latest = list.at(-1);
+  return {
+    ...(parts.length > 0 ? { parts } : {}),
+    ...(latest && typeof latest === "object" ? latest : {})
+  };
 }

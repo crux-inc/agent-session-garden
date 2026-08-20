@@ -4,7 +4,7 @@
   "description": "A local observability garden for OpenCode sessions",
   "type": "module",
   "bin": { "agent-session-garden": "dist/src/cli.js" },
-  "scripts": { "build": "tsc && mkdir -p dist/client && cp client/index.html dist/client/", "typecheck": "tsc --noEmit", "test": "npm run build && node --test", "start": "node dist/src/cli.js" },
+  "scripts": { "build": "tsc && mkdir -p dist/client dist/fixtures && cp client/index.html dist/client/ && cp -R fixtures/opencode dist/fixtures/", "typecheck": "tsc --noEmit", "test": "npm run build && node --test", "start": "node dist/src/cli.js" },
   "engines": { "node": ">=20" },
   "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.5.0" }
 }
