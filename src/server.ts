@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { listen } from "./port.js";
 import type { OpenCodeAdapter } from "./opencode.js";
+import { mask } from "./projection.js";
 
 export type GardenServerOptions = { projectRoot: string; port?: number; clientFile?: string; adapter?: OpenCodeAdapter };
 
@@ -12,6 +13,7 @@ export class GardenServer {
   private readonly clientFile: string;
   private readonly adapter?: OpenCodeAdapter;
   private readonly httpServer = createServer((request, response) => this.route(request, response));
+  private readonly eventClients = new Set<ServerResponse>();
   private started = false;
 
   constructor(options: GardenServerOptions) {
@@ -48,13 +50,22 @@ export class GardenServer {
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/sessions") {
-      this.json(response, 200, { schemaVersion: 1, project: { root: this.projectRoot }, sessions: this.adapter?.snapshot ?? [] });
+      this.json(response, 200, { schemaVersion: 1, project: { root: this.projectRoot }, sessions: (this.adapter?.snapshot ?? []).map(({ rawContent: _rawContent, ...session }) => session) });
+      return;
+    }
+    const contentMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/content$/);
+    if (request.method === "GET" && contentMatch) {
+      const session = this.adapter?.snapshot.find((item) => item.sessionId === contentMatch[1]);
+      if (!session) { this.json(response, 404, { error: "Session not found" }); return; }
+      const content = session.rawContent;
+      this.json(response, 200, content ? { input: mask(content.input), output: mask(content.output) } : { input: null, output: null });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/events") {
       response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
       response.write(`event: ready\ndata: ${JSON.stringify({ ready: true })}\n\n`);
-      request.on("close", () => response.end());
+      this.eventClients.add(response);
+      request.on("close", () => { this.eventClients.delete(response); response.end(); });
       return;
     }
     if (request.method === "GET" && url.pathname === "/") {
@@ -66,6 +77,11 @@ export class GardenServer {
       return;
     }
     this.json(response, 404, { error: "Not found" });
+  }
+
+  publishSnapshot(): void {
+    const snapshot = { schemaVersion: 1, project: { root: this.projectRoot }, sessions: (this.adapter?.snapshot ?? []).map(({ rawContent: _rawContent, ...session }) => session) };
+    for (const client of this.eventClients) client.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
   }
 
   private json(response: ServerResponse, status: number, body: unknown): void {

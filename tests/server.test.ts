@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { GardenServer } from "../src/server.js";
+import type { SessionProjection } from "../src/projection.js";
+
+const session: SessionProjection = {
+  schemaVersion: 1, sessionId: "session-123456789", project: { root: "/tmp/project" }, displayName: "Build garden",
+  agent: { name: "build", gardenRole: "builder" }, model: { provider: "Anthropic", id: "Claude", appearanceKey: "anthropic:claude" },
+  status: { primary: "coding", freshness: "fresh", changedAt: "2026-08-20T00:00:00.000Z" }, activity: { kind: "tool", name: "Bash", state: "completed", summary: "password=[REDACTED]" },
+  lifetime: { startedAt: "2026-08-20T00:00:00.000Z", endedAt: null }, rawContent: { input: "password=secret", output: "sk-secret" }
+};
 
 test("selects an available loopback port and reports health", async () => {
   const server = new GardenServer({ projectRoot: "/tmp/project" });
@@ -26,4 +34,17 @@ test("shutdown releases a Garden-owned server", async () => {
   const url = server.url;
   await server.stop();
   await assert.rejects(fetch(`${url}/api/health`));
+});
+
+test("session detail is masked and raw content requires an explicit expansion request", async () => {
+  const adapter = { snapshot: [session] } as never;
+  const server = new GardenServer({ projectRoot: "/tmp/project", adapter });
+  await server.start();
+  try {
+    const list = await fetch(`${server.url}/api/sessions`).then((response) => response.json());
+    assert.equal(JSON.stringify(list).includes("password=secret"), false);
+    assert.equal(JSON.stringify(list).includes("sk-secret"), false);
+    const detail = await fetch(`${server.url}/api/sessions/${session.sessionId}/content`).then((response) => response.json());
+    assert.deepEqual(detail, { input: "password=[REDACTED]", output: "[REDACTED]" });
+  } finally { await server.stop(); }
 });
