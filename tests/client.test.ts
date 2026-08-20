@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appearanceFor, characterViews, homeSeat, locationFor, ProjectionState, roleForAgent, scenePosition } from "../client/projection.js";
+import { appearanceFor, archiveSessions, characterViews, homeSeat, locationFor, ProjectionState, roleForAgent, scenePosition, ARCHIVE_LIMIT } from "../client/projection.js";
 import type { SessionProjection } from "../src/projection.js";
 
 const session = (id: string, status: SessionProjection["status"]["primary"] = "coding"): SessionProjection => ({
@@ -37,4 +37,12 @@ test("applies a complete snapshot and replaces matching projection updates", () 
   state.applySnapshot({ schemaVersion: 1, project: { root: "/tmp/project" }, sessions: [session("one"), session("two")] });
   state.applyUpdate(session("one", "waiting_for_user"));
   assert.deepEqual(state.current.sessions.map((item) => [item.sessionId, item.status.primary]), [["two", "coding"], ["one", "waiting_for_user"]]);
+});
+
+test("keeps completed and failed archives separate and bounded to recent sessions", () => {
+  const sessions = Array.from({ length: ARCHIVE_LIMIT + 2 }, (_, index) => session(`completed-${index}`, "completed" as const)).map((item, index) => ({ ...item, status: { ...item.status, changedAt: `2026-08-${String(index + 1).padStart(2, "0")}T00:00:00.000Z` } }));
+  const failed = session("failed", "failed");
+  assert.equal(archiveSessions([...sessions, failed], "completed").length, ARCHIVE_LIMIT);
+  assert.equal(archiveSessions([...sessions, failed], "completed").some((item) => item.sessionId === "failed"), false);
+  assert.deepEqual(archiveSessions([...sessions, failed], "failed").map((item) => item.sessionId), ["failed"]);
 });

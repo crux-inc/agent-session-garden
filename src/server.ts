@@ -5,13 +5,16 @@ import { listen } from "./port.js";
 import type { OpenCodeAdapter } from "./opencode.js";
 import { mask, type SessionProjection } from "./projection.js";
 
-export type GardenServerOptions = { projectRoot: string; port?: number; clientFile?: string; adapter?: OpenCodeAdapter };
+export type GardenOperationalState = "ready" | "disconnected" | "reconnecting" | "stale" | "startup_failure" | "unsupported_version";
+export type GardenServerOptions = { projectRoot: string; port?: number; clientFile?: string; adapter?: OpenCodeAdapter; operationalState?: GardenOperationalState; operationalMessage?: string };
 
 export class GardenServer {
   readonly projectRoot: string;
   readonly requestedPort?: number;
   private readonly clientFile: string;
   private readonly adapter?: OpenCodeAdapter;
+  private operationalState: GardenOperationalState;
+  private operationalMessage: string | null;
   private readonly httpServer = createServer((request, response) => this.route(request, response));
   private readonly eventClients = new Set<ServerResponse>();
   private started = false;
@@ -21,6 +24,8 @@ export class GardenServer {
     this.requestedPort = options.port;
     this.clientFile = options.clientFile ?? path.join(process.cwd(), "client", "index.html");
     this.adapter = options.adapter;
+    this.operationalState = options.operationalState ?? (this.adapter ? "ready" : "disconnected");
+    this.operationalMessage = options.operationalMessage ?? null;
   }
 
   get port(): number {
@@ -46,7 +51,7 @@ export class GardenServer {
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", this.url);
     if (request.method === "GET" && url.pathname === "/api/health") {
-      this.json(response, 200, { ready: true, server: "ready", reconciliation: this.adapter ? "connected" : "disconnected", adapter: this.adapter ? "connected" : "disconnected" });
+      this.json(response, 200, { ready: this.operationalState === "ready", server: "ready", state: this.operationalState, message: this.operationalMessage, reconciliation: this.adapter ? "connected" : "disconnected", adapter: this.adapter ? "connected" : "disconnected" });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/sessions") {
@@ -83,6 +88,12 @@ export class GardenServer {
   publishSnapshot(): void {
     const snapshot = { schemaVersion: 1, project: { root: this.projectRoot }, sessions: (this.adapter?.snapshot ?? []).map(({ rawContent: _rawContent, ...session }) => session) };
     for (const client of this.eventClients) client.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
+  }
+
+  setOperationalState(state: GardenOperationalState, message: string | null = null): void {
+    this.operationalState = state;
+    this.operationalMessage = message;
+    for (const client of this.eventClients) client.write(`event: health\ndata: ${JSON.stringify({ state, message })}\n\n`);
   }
 
   publishUpdate(session: SessionProjection): void {

@@ -12,6 +12,7 @@ export type SessionProjection = {
   lifetime: { startedAt: string; endedAt: string | null };
 };
 export type ProjectionSnapshot = { schemaVersion: 1; project: { root: string }; sessions: SessionProjection[] };
+export const ARCHIVE_LIMIT = 12;
 
 export const roleForAgent = (agent: string): GardenRole => agent === "build" ? "builder" : agent === "plan" ? "planner" : "generic";
 
@@ -44,6 +45,10 @@ export function scenePosition(sessionId: string, status: PrimaryStatus): { x: nu
 export type CharacterView = SessionProjection & { position: { x: number; y: number }; homeSeat: { x: number; y: number }; location: string; appearance: { coat: string; hair: string } };
 export function characterViews(sessions: SessionProjection[]): CharacterView[] {
   return sessions.map((session) => ({ ...session, position: scenePosition(session.sessionId, session.status.primary), homeSeat: homeSeat(session.sessionId), location: locationFor(session.status.primary), appearance: appearanceFor(session) }));
+}
+
+export function archiveSessions(sessions: SessionProjection[], status: "completed" | "failed"): SessionProjection[] {
+  return sessions.filter((session) => session.status.primary === status).sort((a, b) => b.status.changedAt.localeCompare(a.status.changedAt)).slice(0, ARCHIVE_LIMIT);
 }
 
 export class ProjectionState {

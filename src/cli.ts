@@ -32,10 +32,19 @@ export async function run(argv = process.argv.slice(2), output = console.log): P
   const root = await detectProjectRoot(args.directory);
   let server: GardenServer | undefined;
   const adapter = new OpenCodeAdapter({ projectRoot: root, baseUrl: args.opencodeUrl, onProjectionUpdate: () => server?.publishSnapshot() });
-  try { await adapter.connect(); } catch { await adapter.startOwned(); }
-  server = new GardenServer({ projectRoot: root, port: args.port, adapter, clientFile: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "client", "index.html") });
+  let operationalState: "ready" | "startup_failure" | "unsupported_version" = "ready";
+  let operationalMessage: string | undefined;
+  try { await adapter.connect(); } catch (error) {
+    operationalMessage = error instanceof Error ? error.message : String(error);
+    operationalState = /Unsupported or unhealthy OpenCode server/.test(operationalMessage) ? "unsupported_version" : "startup_failure";
+    try { await adapter.startOwned(); } catch (startupError) {
+      operationalState = "startup_failure";
+      operationalMessage = startupError instanceof Error ? startupError.message : String(startupError);
+    }
+  }
+  server = new GardenServer({ projectRoot: root, port: args.port, adapter, operationalState, operationalMessage, clientFile: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "client", "index.html") });
   await server.start();
-  const refresh = setInterval(() => { void adapter.reconcile().catch(() => adapter.markStale()); }, 1000);
+  const refresh = setInterval(() => { void adapter.reconcile().then(() => server?.setOperationalState("ready")).catch(() => { adapter.markStale(); server?.setOperationalState("stale", "OpenCode projection is stale; reconnecting"); }); }, 1000);
   output(`Agent Session Garden serving ${server.url} for ${root}`);
   if (args.open) {
     const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
