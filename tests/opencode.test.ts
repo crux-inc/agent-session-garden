@@ -69,6 +69,15 @@ test("preserves stale freshness and activity independently of primary status", (
 
 test("masks common credential-shaped summaries", () => {
   assert.equal(mask("password=hunter2 and sk-abc123"), "password=[REDACTED] and [REDACTED]");
+  assert.equal(mask('AWS_ACCESS_KEY_ID="abc" private_key=-----BEGIN PRIVATE KEY-----secret-----END PRIVATE KEY-----'), 'AWS_ACCESS_KEY_ID=[REDACTED] private_key=[REDACTED PRIVATE KEY]');
+});
+
+test("keeps raw activity out of the default projection while retaining it for explicit expansion", () => {
+  const projection = projectSession(validSession, projectRoot, {
+    part: { type: "tool", tool: "Bash", state: "completed", summary: "password=secret", input: "TOKEN=sk-secret", output: "done" }
+  });
+  assert.equal(JSON.stringify(projection).includes("sk-secret"), true);
+  assert.deepEqual(projection?.rawContent, { input: "TOKEN=sk-secret", output: "done" });
 });
 
 test("adapter checks health version and reconciles inventory", async () => {
