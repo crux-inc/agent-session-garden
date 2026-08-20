@@ -38,6 +38,35 @@ test("status policy preserves terminal status over transient activity", () => {
   assert.equal(projection?.activity, null);
 });
 
+test("applies complete deterministic status precedence", () => {
+  const cases: Array<[string, any, string]> = [
+    ["permission wins over question and tools", { permission: true, question: true, parts: [{ type: "tool", tool: "Bash", state: "running" }] }, "waiting_for_permission"],
+    ["question wins over tools", { question: true, parts: [{ type: "tool", tool: "Bash", state: "running" }] }, "waiting_for_user"],
+    ["generation is coding", { generating: "running" }, "coding"],
+    ["no active work waits for system", {}, "waiting_for_system"],
+    ["invalid observations are unknown", { invalid: true }, "unknown"]
+  ];
+  for (const [, observed, expected] of cases) assert.equal(projectSession(validSession, projectRoot, observed)?.status.primary, expected);
+});
+
+test("selects research detail before generic tools and retains tool errors without failing", () => {
+  const projection = projectSession(validSession, projectRoot, { parts: [
+    { type: "tool", tool: "Bash", state: "error", summary: "token=secret" },
+    { type: "tool", tool: "WebFetch", state: "running", summary: "url=https://example.test" }
+  ] });
+  assert.equal(projection?.status.primary, "researching");
+  assert.deepEqual(projection?.activity, { kind: "tool", name: "WebFetch", state: "running", summary: "url=https://example.test" });
+  assert.equal(projectSession(validSession, projectRoot, { part: { type: "tool", tool: "Bash", state: "error" } })?.status.primary, "waiting_for_system");
+});
+
+test("preserves stale freshness and activity independently of primary status", () => {
+  const fresh = projectSession(validSession, projectRoot, { part: { type: "tool", tool: "Bash", state: "running" } });
+  const stale = projectSession(validSession, projectRoot, { invalid: true }, "stale", fresh ?? undefined);
+  assert.equal(stale?.status.freshness, "stale");
+  assert.equal(stale?.status.primary, "tool_calling");
+  assert.deepEqual(stale?.activity, fresh?.activity);
+});
+
 test("masks common credential-shaped summaries", () => {
   assert.equal(mask("password=hunter2 and sk-abc123"), "password=[REDACTED] and [REDACTED]");
 });
