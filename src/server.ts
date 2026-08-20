@@ -68,7 +68,7 @@ export class GardenServer {
     }
     if (request.method === "GET" && url.pathname === "/api/events") {
       response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
-      response.write(`event: ready\ndata: ${JSON.stringify({ ready: true })}\n\n`);
+      response.write(`event: ready\ndata: ${JSON.stringify({ ready: this.operationalState === "ready", state: this.operationalState, message: this.operationalMessage })}\n\n`);
       this.eventClients.add(response);
       request.on("close", () => { this.eventClients.delete(response); response.end(); });
       return;
