@@ -21,7 +21,7 @@ export function parseArgs(argv: string[]): Args {
       port = value;
     } else if (argument === "--directory") directory = argv[++index];
     else if (argument === "--opencode-url") opencodeUrl = argv[++index];
-    else if (argument === "--help") { console.log("Usage: agent-session-garden [--port PORT] [--directory PATH] [--open]"); process.exit(0); }
+    else if (argument === "--help") { console.log("Usage: agent-session-garden [--port PORT] [--directory PATH] [--opencode-url URL] [--open]"); process.exit(0); }
     else throw new Error(`Unknown option: ${argument}`);
   }
   return { port, directory, open, opencodeUrl };
