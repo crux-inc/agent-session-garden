@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { OpenCodeAdapter } from "../src/opencode.js";
-import { projectSession, mask } from "../src/projection.js";
+import { projectSession, mask, type SessionProjection } from "../src/projection.js";
 
 const projectRoot = process.cwd();
 const validSession = {
@@ -122,12 +122,121 @@ test("parse failures trigger reconciliation and retain stale projections if reco
   assert.equal(adapter.snapshot[0]?.status.primary, "waiting_for_system");
 });
 
-test("owned OpenCode shutdown only kills the child process it started", async () => {
-  const killed: string[] = [];
+test("successful reconciliation publishes only the authoritative project snapshot", async () => {
+  const updates: SessionProjection[][] = [];
+  let includeSession = true;
   const adapter = new OpenCodeAdapter({
     projectRoot,
+    onProjectionUpdate: (snapshot) => updates.push(snapshot),
+    fetch: async (url) => {
+      if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (String(url).endsWith("/doc")) return jsonResponse({});
+      if (String(url).endsWith("/session")) return jsonResponse(includeSession ? [validSession] : []);
+      return jsonResponse({}, 404);
+    }
+  });
+  await adapter.connect();
+  includeSession = false;
+  await adapter.reconcile();
+  assert.equal(adapter.snapshot.length, 0);
+  assert.equal(updates.at(-1)?.length, 0);
+});
+
+test("unknown events do not reconcile, while allowlisted events publish a snapshot", async () => {
+  let sessionRequests = 0;
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    fetch: async (url) => {
+      if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (String(url).endsWith("/doc")) return jsonResponse({});
+      if (String(url).endsWith("/session")) { sessionRequests += 1; return jsonResponse([validSession]); }
+      return jsonResponse({}, 404);
+    }
+  });
+  await adapter.connect();
+  const initialRequests = sessionRequests;
+  assert.equal(await adapter.consumeEvent(JSON.stringify({ type: "server.updated" })), null);
+  assert.equal(sessionRequests, initialRequests);
+  await adapter.consumeEvent(JSON.stringify({ type: "session.updated" }));
+  assert.equal(sessionRequests, initialRequests + 1);
+});
+
+test("stale transitions publish through the snapshot interface and isolate callback errors", async () => {
+  const states: string[] = [];
+  const logs: string[] = [];
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    onProjectionUpdate: () => { throw new Error("browser unavailable"); },
+    onOperationalState: (state) => states.push(state),
+    logger: (message) => logs.push(message),
+    fetch: async (url) => {
+      if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (String(url).endsWith("/doc")) return jsonResponse({});
+      if (String(url).endsWith("/session")) return jsonResponse([validSession]);
+      return jsonResponse({}, 404);
+    }
+  });
+  await adapter.connect();
+  adapter.markStale("connection lost");
+  assert.equal(adapter.snapshot[0]?.status.freshness, "stale");
+  assert.ok(states.includes("stale"));
+  assert.ok(logs.some((message) => message.includes("Projection callback failed")));
+});
+
+test("owned OpenCode startup uses the dynamically assigned server URL", async () => {
+  const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void };
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => {};
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    spawn: (() => child) as never,
+    fetch: async (url) => {
+      if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (String(url).endsWith("/doc")) return jsonResponse({});
+      if (String(url).endsWith("/session")) return jsonResponse([validSession]);
+      return jsonResponse({}, 404);
+    }
+  });
+  const startup = adapter.startOwned("fake-opencode");
+  await new Promise<void>((resolve) => setImmediate(() => {
+    child.stderr.emit("data", "opencode server listening on http://127.0.0.1:61234\n");
+    resolve();
+  }));
+  await startup;
+  assert.equal(adapter.baseUrl, "http://127.0.0.1:61234");
+  assert.equal(adapter.snapshot.length, 1);
+});
+
+test("native SSE source validates content type and parses event frames", async () => {
+  const { nativeSseSource } = await import("../src/opencode.js");
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"session.updated"}\n\n'));
+      controller.close();
+    }
+  });
+  const source = nativeSseSource(async () => new Response(body, { headers: { "content-type": "text/event-stream" } }));
+  const frames: unknown[] = [];
+  for await (const frame of await source("http://opencode.test", new AbortController().signal)) frames.push(frame);
+  assert.deepEqual(frames, [{ type: "session.updated" }]);
+});
+
+test("owned OpenCode shutdown only kills the child process it started", async () => {
+  const killed: string[] = [];
+  let child: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void };
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    fetch: async (url) => {
+      if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (String(url).endsWith("/doc")) return jsonResponse({});
+      if (String(url).endsWith("/session")) return jsonResponse([]);
+      return jsonResponse({}, 404);
+    },
     spawn: ((command: string, args: string[]) => {
-      const child = new EventEmitter() as EventEmitter & { kill: () => void };
+      child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void };
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
       assert.equal(command, "fake-opencode");
       assert.deepEqual(args, ["serve", "--hostname", "127.0.0.1", "--port", "0"]);
       child.kill = () => { killed.push("owned"); };
@@ -135,7 +244,12 @@ test("owned OpenCode shutdown only kills the child process it started", async ()
     }) as never
   });
   await adapter.stop();
-  await adapter.startOwned("fake-opencode");
+  const startup = adapter.startOwned("fake-opencode");
+  await new Promise<void>((resolve) => setImmediate(() => {
+    child.stderr.emit("data", "opencode server listening on http://127.0.0.1:61234\n");
+    resolve();
+  }));
+  await startup;
   assert.equal(adapter.owned, true);
   await adapter.stop();
   assert.deepEqual(killed, ["owned"]);
