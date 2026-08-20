@@ -10,6 +10,16 @@ const session: SessionProjection = {
   lifetime: { startedAt: "2026-08-20T00:00:00.000Z", endedAt: null }, rawContent: { input: "password=secret", output: "sk-secret" }
 };
 
+test("serves the browser client", async () => {
+  const server = new GardenServer({ projectRoot: "/tmp/project", clientFile: new URL("../client/index.html", import.meta.url).pathname });
+  await server.start();
+  try {
+    const response = await fetch(server.url);
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /Agent Session Garden/);
+  } finally { await server.stop(); }
+});
+
 test("selects an available loopback port and reports health", async () => {
   const server = new GardenServer({ projectRoot: "/tmp/project" });
   await server.start();
