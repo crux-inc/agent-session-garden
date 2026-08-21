@@ -1,0 +1,7 @@
+[
+  {
+    "parts": [
+      { "type": "tool", "tool": "WebFetch", "state": "running" }
+    ]
+  }
+]

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { OpenCodeAdapter } from "../src/opencode.js";
 import { projectSession, mask, type SessionProjection } from "../src/projection.js";
+import { readFile } from "node:fs/promises";
 
 const projectRoot = process.cwd();
 const validSession = {
@@ -90,13 +91,77 @@ test("adapter checks health version and reconciles inventory", async () => {
       if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
       if (String(url).endsWith("/doc")) return jsonResponse({});
       if (String(url).endsWith("/session")) return jsonResponse([validSession, { ...validSession, id: "outside", directory: "/tmp/outside" }]);
+      if (String(url).endsWith("/session/status")) return jsonResponse({ [validSession.id]: "idle", outside: "idle" });
+      if (String(url).includes("/session/session-123456789")) return jsonResponse(validSession);
+      if (String(url).includes("/session/outside")) return jsonResponse({ ...validSession, id: "outside", directory: "/tmp/outside" });
       return jsonResponse({}, 404);
     }
   });
   await adapter.connect();
-  assert.deepEqual(seen, ["http://opencode.test/global/health", "http://opencode.test/doc", "http://opencode.test/session"]);
+  assert.deepEqual(seen, [
+    "http://opencode.test/global/health", "http://opencode.test/doc", "http://opencode.test/session",
+    "http://opencode.test/session/status", "http://opencode.test/session/session-123456789",
+    "http://opencode.test/session/session-123456789/message", "http://opencode.test/session/outside",
+    "http://opencode.test/session/outside/message"
+  ]);
   assert.equal(adapter.snapshot.length, 1);
   assert.equal(adapter.snapshot[0]?.displayName, "Implement observer");
+});
+
+test("reconciliation combines inventory, authoritative status, and session detail", async () => {
+  const seen: string[] = [];
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    baseUrl: "http://opencode.test",
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      seen.push(path);
+      if (path === "/global/health") return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (path === "/doc") return jsonResponse({});
+      if (path === "/session") return jsonResponse([{ id: validSession.id, directory: projectRoot }]);
+      if (path === "/session/status") return jsonResponse({ [validSession.id]: { type: "busy" } });
+      if (path === `/session/${validSession.id}`) return jsonResponse({ ...validSession, title: "Authoritative title", model: { provider: "OpenAI", id: "gpt-5" } });
+      if (path === `/session/${validSession.id}/message`) return jsonResponse([{ parts: [{ type: "tool", tool: "WebFetch", state: "running" }] }]);
+      return jsonResponse({}, 404);
+    }
+  });
+
+  await adapter.connect();
+  assert.equal(adapter.snapshot[0]?.sessionId, validSession.id);
+  assert.equal(adapter.snapshot[0]?.displayName, "Authoritative title");
+  assert.deepEqual(adapter.snapshot[0]?.model, { provider: "OpenAI", id: "gpt-5", appearanceKey: "openai:gpt-5" });
+  assert.equal(adapter.snapshot[0]?.status.primary, "researching");
+  assert.deepEqual(adapter.snapshot[0]?.activity, { kind: "tool", name: "WebFetch", state: "running", summary: null });
+  assert.deepEqual(seen, [
+    "/global/health", "/doc", "/session", "/session/status",
+    `/session/${validSession.id}`, `/session/${validSession.id}/message`
+  ]);
+});
+
+test("versioned OpenCode HTTP fixtures describe the reconciliation contract", async () => {
+  const fixture = async (name: string) => JSON.parse(await readFile(new URL(`../fixtures/opencode/1.18.18/${name}.json`, import.meta.url), "utf8"));
+  assert.equal((await fixture("session-inventory"))[0].id, validSession.id);
+  assert.equal((await fixture("session-status"))[validSession.id], "busy");
+  assert.equal((await fixture("session-detail")).model.id, "Claude-Sonnet");
+  assert.equal((await fixture("session-messages"))[0].parts[0].tool, "WebFetch");
+});
+
+test("reconciliation excludes malformed inventory sessions rather than guessing identity", async () => {
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/global/health") return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (path === "/doc") return jsonResponse({});
+      if (path === "/session") return jsonResponse([{ directory: projectRoot }, { id: "valid", directory: projectRoot }]);
+      if (path === "/session/status") return jsonResponse({ valid: { type: "idle" } });
+      if (path === "/session/valid") return jsonResponse({ ...validSession, id: "valid" });
+      if (path === "/session/valid/message") return jsonResponse([]);
+      return jsonResponse({}, 404);
+    }
+  });
+  await adapter.connect();
+  assert.deepEqual(adapter.snapshot.map(({ sessionId }) => sessionId), ["valid"]);
 });
 
 test("adapter rejects unsupported OpenCode versions explicitly", async () => {
@@ -112,6 +177,9 @@ test("parse failures trigger reconciliation and retain stale projections if reco
       if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
       if (String(url).endsWith("/doc")) return jsonResponse({});
       if (String(url).endsWith("/session") && !fail) return jsonResponse([validSession]);
+      if (String(url).endsWith("/session/status") && !fail) return jsonResponse({ [validSession.id]: "idle" });
+      if (String(url).endsWith("/session/session-123456789") && !fail) return jsonResponse(validSession);
+      if (String(url).endsWith("/session/session-123456789/message") && !fail) return jsonResponse([]);
       return jsonResponse({}, 500);
     }
   });
@@ -132,6 +200,9 @@ test("successful reconciliation publishes only the authoritative project snapsho
       if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
       if (String(url).endsWith("/doc")) return jsonResponse({});
       if (String(url).endsWith("/session")) return jsonResponse(includeSession ? [validSession] : []);
+      if (String(url).endsWith("/session/status")) return jsonResponse({ [validSession.id]: "idle" });
+      if (String(url).endsWith("/session/session-123456789")) return jsonResponse(validSession);
+      if (String(url).endsWith("/session/session-123456789/message")) return jsonResponse([]);
       return jsonResponse({}, 404);
     }
   });
@@ -150,6 +221,9 @@ test("unknown events do not reconcile, while allowlisted events publish a snapsh
       if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
       if (String(url).endsWith("/doc")) return jsonResponse({});
       if (String(url).endsWith("/session")) { sessionRequests += 1; return jsonResponse([validSession]); }
+      if (String(url).endsWith("/session/status")) return jsonResponse({ [validSession.id]: "idle" });
+      if (String(url).endsWith("/session/session-123456789")) return jsonResponse(validSession);
+      if (String(url).endsWith("/session/session-123456789/message")) return jsonResponse([]);
       return jsonResponse({}, 404);
     }
   });
@@ -173,6 +247,9 @@ test("stale transitions publish through the snapshot interface and isolate callb
       if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
       if (String(url).endsWith("/doc")) return jsonResponse({});
       if (String(url).endsWith("/session")) return jsonResponse([validSession]);
+      if (String(url).endsWith("/session/status")) return jsonResponse({ [validSession.id]: "idle" });
+      if (String(url).endsWith("/session/session-123456789")) return jsonResponse(validSession);
+      if (String(url).endsWith("/session/session-123456789/message")) return jsonResponse([]);
       return jsonResponse({}, 404);
     }
   });
@@ -195,6 +272,9 @@ test("owned OpenCode startup uses the dynamically assigned server URL", async ()
       if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
       if (String(url).endsWith("/doc")) return jsonResponse({});
       if (String(url).endsWith("/session")) return jsonResponse([validSession]);
+      if (String(url).endsWith("/session/status")) return jsonResponse({ [validSession.id]: "idle" });
+      if (String(url).endsWith("/session/session-123456789")) return jsonResponse(validSession);
+      if (String(url).endsWith("/session/session-123456789/message")) return jsonResponse([]);
       return jsonResponse({}, 404);
     }
   });
@@ -231,6 +311,7 @@ test("owned OpenCode shutdown only kills the child process it started", async ()
       if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
       if (String(url).endsWith("/doc")) return jsonResponse({});
       if (String(url).endsWith("/session")) return jsonResponse([]);
+      if (String(url).endsWith("/session/status")) return jsonResponse({});
       return jsonResponse({}, 404);
     },
     spawn: ((command: string, args: string[]) => {
