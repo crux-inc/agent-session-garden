@@ -212,11 +212,7 @@ export class OpenCodeAdapter {
         this.log(`Ignoring unknown OpenCode event ${event.type}`);
         return null;
       }
-      if (event.type === "session.error") {
-        const properties = event.properties && typeof event.properties === "object" ? event.properties as Record<string, unknown> : {};
-        const sessionId = typeof properties.sessionID === "string" ? properties.sessionID : typeof properties.sessionId === "string" ? properties.sessionId : typeof properties.id === "string" ? properties.id : undefined;
-        if (sessionId) this.sessionErrors.add(sessionId);
-      }
+      this.rememberSessionError(event);
       await this.reconcile();
       return this.snapshot;
     } catch (error) {
@@ -260,7 +256,10 @@ export class OpenCodeAdapter {
         this.stateUpdate?.("connected");
         for await (const event of stream) {
           if (this.stopped) return;
-          if (EVENT_TYPES.has(event.type)) await this.reconcile().catch(() => undefined);
+          if (EVENT_TYPES.has(event.type)) {
+            this.rememberSessionError(event);
+            await this.reconcile().catch(() => undefined);
+          }
           else this.log(`Ignoring unknown OpenCode event ${event.type}`);
         }
         if (!this.stopped) throw new Error("OpenCode SSE stream ended");
@@ -278,6 +277,13 @@ export class OpenCodeAdapter {
 
   private publish(): void {
     try { this.update?.(this.snapshot); } catch (error) { this.log(`Projection callback failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+
+  private rememberSessionError(event: SseFrame): void {
+    if (event.type !== "session.error") return;
+    const properties = event.properties && typeof event.properties === "object" ? event.properties as Record<string, unknown> : {};
+    const sessionId = typeof properties.sessionID === "string" ? properties.sessionID : typeof properties.sessionId === "string" ? properties.sessionId : typeof properties.id === "string" ? properties.id : undefined;
+    if (sessionId) this.sessionErrors.add(sessionId);
   }
 
   private async get(path: string): Promise<any> {
@@ -305,8 +311,8 @@ function normalizeStatus(status: any): string | undefined {
 
 function observationFromMessages(messages: any): Record<string, unknown> {
   const list = Array.isArray(messages) ? messages : Array.isArray(messages?.messages) ? messages.messages : [];
-  const parts = list.flatMap((message: any) => Array.isArray(message?.parts) ? message.parts : message?.part ? [message.part] : []);
   const latest = list.at(-1);
+  const parts = Array.isArray(latest?.parts) ? latest.parts : latest?.part ? [latest.part] : [];
   return {
     ...(parts.length > 0 ? { parts } : {}),
     ...(latest && typeof latest === "object" ? latest : {})
