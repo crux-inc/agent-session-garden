@@ -94,7 +94,6 @@ test("derives a masked activity summary from tool content", () => {
   } });
   assert.deepEqual(projection?.activity, { kind: "tool", name: "Bash", state: "running", summary: "TOKEN=[REDACTED]" });
 });
-
 test("terminal message errors fail the session while isolated tool errors remain active detail", () => {
   const failed = projectSession(validSession, projectRoot, {
     parts: [{ type: "text", state: "error", error: "model stopped" }]
