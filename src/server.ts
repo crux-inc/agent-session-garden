@@ -51,7 +51,8 @@ export class GardenServer {
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", this.url);
     if (request.method === "GET" && url.pathname === "/api/health") {
-      this.json(response, 200, { ready: this.operationalState === "ready", server: "ready", state: this.operationalState, message: this.operationalMessage, reconciliation: this.adapter ? "connected" : "disconnected", adapter: this.adapter ? "connected" : "disconnected" });
+      const connection = this.adapter ? this.operationalState === "ready" ? "connected" : this.operationalState : "disconnected";
+      this.json(response, 200, { ready: this.operationalState === "ready", server: "ready", state: this.operationalState, message: this.operationalMessage, reconciliation: connection, adapter: connection });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/sessions") {

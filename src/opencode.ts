@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { SessionProjection } from "./projection.js";
-import { projectSession } from "./projection.js";
+import { projectSession, terminalMessageErrorOf } from "./projection.js";
 
 export type FetchLike = typeof fetch;
 export type OperationalState = "connected" | "reconnecting" | "stale" | "unsupported_version";
@@ -16,6 +16,14 @@ export type OpenCodeOptions = {
   onProjectionUpdate?: (snapshot: SessionProjection[]) => void;
   onOperationalState?: (state: OperationalState, message?: string) => void;
   autoStartOwned?: boolean;
+  retry?: {
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    slowDelayMs?: number;
+    rapidFailureLimit?: number;
+    random?: () => number;
+    sleep?: (milliseconds: number) => Promise<void>;
+  };
 };
 
 const EVENT_TYPES = new Set([
@@ -47,7 +55,10 @@ async function* parseSse(reader: ReadableStreamDefaultReader<Uint8Array>): Async
       buffer = records.pop() ?? "";
       for (const record of records) {
         const data = record.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
-        if (!data) throw new Error("OpenCode SSE frame has no data");
+        if (!data) {
+          if (record.split(/\r?\n/).every((line) => line.trim() === "" || line.startsWith(":"))) continue;
+          throw new Error("OpenCode SSE frame has no data");
+        }
         const event = JSON.parse(data) as SseFrame;
         if (!event || typeof event.type !== "string") throw new Error("OpenCode SSE frame has an invalid event type");
         yield event;
@@ -72,6 +83,7 @@ export class OpenCodeAdapter {
   private readonly update?: (snapshot: SessionProjection[]) => void;
   private readonly stateUpdate?: (state: OperationalState, message?: string) => void;
   private readonly autoStartOwned: boolean;
+  private readonly retry: Required<NonNullable<OpenCodeOptions["retry"]>>;
   private readonly explicitBaseUrl: boolean;
   private child: ChildProcess | null = null;
   private streamAbort: AbortController | null = null;
@@ -81,6 +93,7 @@ export class OpenCodeAdapter {
   private refreshPending = false;
   private refreshSequence = 0;
   private projections = new Map<string, SessionProjection>();
+  private sessionErrors = new Set<string>();
 
   constructor(options: OpenCodeOptions) {
     this.explicitBaseUrl = options.baseUrl !== undefined;
@@ -93,6 +106,14 @@ export class OpenCodeAdapter {
     this.update = options.onProjectionUpdate;
     this.stateUpdate = options.onOperationalState;
     this.autoStartOwned = options.autoStartOwned ?? false;
+    this.retry = {
+      baseDelayMs: options.retry?.baseDelayMs ?? 100,
+      maxDelayMs: options.retry?.maxDelayMs ?? 5000,
+      slowDelayMs: options.retry?.slowDelayMs ?? 10000,
+      rapidFailureLimit: options.retry?.rapidFailureLimit ?? 5,
+      random: options.retry?.random ?? Math.random,
+      sleep: options.retry?.sleep ?? sleep
+    };
   }
 
   get owned(): boolean { return this.child !== null; }
@@ -127,10 +148,12 @@ export class OpenCodeAdapter {
         const contradictoryIdentity = detail?.id !== id && detail?.sessionID !== id;
         const authoritative = contradictoryIdentity ? { ...session } : { ...session, ...(detail && typeof detail === "object" ? detail : {}), id };
         const statusResult = statusFor(statuses, id);
+        if (statusResult.value?.match(/^(completed|success|failed|error)$/i)) this.sessionErrors.delete(id);
         const observed = {
           ...observationFromMessages(messages),
           status: statusResult.value,
-          invalid: contradictoryIdentity || statusResult.malformed
+          invalid: contradictoryIdentity || statusResult.malformed,
+          ...(this.sessionErrors.has(id) && !statusResult.value?.match(/^(completed|success|failed|error)$/i) ? { sessionError: true } : {})
         };
         const projection = projectSession(authoritative, this.projectRoot, observed);
         if (projection) next.set(projection.sessionId, projection);
@@ -138,7 +161,6 @@ export class OpenCodeAdapter {
       if (sequence !== this.refreshSequence || this.stopped) return;
       this.projections = next;
       this.publish();
-      this.stateUpdate?.("connected");
     } catch (error) {
       this.markStale(error instanceof Error ? error.message : String(error));
       throw error;
@@ -210,6 +232,7 @@ export class OpenCodeAdapter {
         this.log(`Ignoring unknown OpenCode event ${event.type}`);
         return null;
       }
+      this.rememberSessionError(event);
       await this.reconcile();
       return this.snapshot;
     } catch (error) {
@@ -243,26 +266,41 @@ export class OpenCodeAdapter {
   }
 
   private async observe(): Promise<void> {
-    let delay = 100;
+    let failures = 0;
+    let reconciled = false;
     while (!this.stopped) {
       try {
+        if (!reconciled) {
+          await this.reconcile();
+          reconciled = true;
+        }
         this.streamAbort = new AbortController();
         const stream = await this.source!(this.baseUrl, this.streamAbort.signal);
-        await this.reconcile();
-        delay = 100;
         this.stateUpdate?.("connected");
         for await (const event of stream) {
           if (this.stopped) return;
-          if (EVENT_TYPES.has(event.type)) await this.reconcile().catch(() => undefined);
+          if (EVENT_TYPES.has(event.type)) {
+            this.rememberSessionError(event);
+            await this.reconcile().catch(() => undefined);
+          }
           else this.log(`Ignoring unknown OpenCode event ${event.type}`);
+          failures = 0;
         }
         if (!this.stopped) throw new Error("OpenCode SSE stream ended");
       } catch (error) {
         if (this.stopped) return;
         this.markStale(error instanceof Error ? error.message : String(error));
+        try {
+          await this.reconcile();
+          reconciled = true;
+        } catch {
+          reconciled = false;
+        }
+        failures += 1;
         this.stateUpdate?.("reconnecting", "OpenCode observation is reconnecting");
-        await sleep(delay + Math.floor(Math.random() * delay));
-        delay = Math.min(delay * 2, 5000);
+        const exponential = Math.min(this.retry.baseDelayMs * (2 ** (failures - 1)), this.retry.maxDelayMs);
+        const delay = failures > this.retry.rapidFailureLimit ? Math.max(exponential, this.retry.slowDelayMs) : exponential;
+        await this.retry.sleep(delay + Math.floor(this.retry.random() * delay));
       } finally {
         this.streamAbort = null;
       }
@@ -271,6 +309,13 @@ export class OpenCodeAdapter {
 
   private publish(): void {
     try { this.update?.(this.snapshot); } catch (error) { this.log(`Projection callback failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+
+  private rememberSessionError(event: SseFrame): void {
+    if (event.type !== "session.error") return;
+    const properties = event.properties && typeof event.properties === "object" ? event.properties as Record<string, unknown> : {};
+    const sessionId = typeof properties.sessionID === "string" ? properties.sessionID : typeof properties.sessionId === "string" ? properties.sessionId : typeof properties.id === "string" ? properties.id : undefined;
+    if (sessionId) this.sessionErrors.add(sessionId);
   }
 
   private async get(path: string): Promise<any> {
@@ -298,9 +343,11 @@ function normalizeStatus(status: any): string | undefined {
 
 function observationFromMessages(messages: any): Record<string, unknown> {
   const list = Array.isArray(messages) ? messages : Array.isArray(messages?.messages) ? messages.messages : [];
-  const parts = list.flatMap((message: any) => Array.isArray(message?.parts) ? message.parts : message?.part ? [message.part] : []);
+  const allParts = list.flatMap((message: any) => Array.isArray(message?.parts) ? message.parts : message?.part ? [message.part] : []);
   const latest = list.at(-1);
+  const parts = Array.isArray(latest?.parts) ? latest.parts : latest?.part ? [latest.part] : [];
   return {
+    ...(terminalMessageErrorOf({ parts: allParts }) ? { terminalMessageError: true } : {}),
     ...(parts.length > 0 ? { parts } : {}),
     ...(latest && typeof latest === "object" ? latest : {})
   };

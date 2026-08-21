@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { OpenCodeAdapter } from "../src/opencode.js";
+import { nativeSseSource, OpenCodeAdapter } from "../src/opencode.js";
 import { projectSession, mask, type SessionProjection } from "../src/projection.js";
 import { readFile } from "node:fs/promises";
 
@@ -18,6 +18,11 @@ const validSession = {
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100 && !condition(); attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(condition(), true);
 }
 
 test("projects valid OpenCode sessions into Garden protocol shape", () => {
@@ -37,6 +42,15 @@ test("status policy preserves terminal status over transient activity", () => {
   const projection = projectSession({ ...validSession, status: "failed" }, projectRoot, { part: { type: "tool", tool: "Bash", state: "running" } });
   assert.equal(projection?.status.primary, "failed");
   assert.equal(projection?.activity, null);
+});
+
+test("terminal projections receive their authoritative end time", () => {
+  const completed = projectSession({ ...validSession, status: "completed", updatedAt: "2026-08-20T01:02:03.000Z" }, projectRoot, { part: { type: "tool", tool: "Bash", state: "running" } });
+  assert.equal(completed?.status.primary, "completed");
+  assert.equal(completed?.lifetime.endedAt, "2026-08-20T01:02:03.000Z");
+
+  const failed = projectSession({ ...validSession, status: "failed", time: { updated: "2026-08-20T02:03:04.000Z" } }, projectRoot);
+  assert.equal(failed?.lifetime.endedAt, "2026-08-20T02:03:04.000Z");
 });
 
 test("applies complete deterministic status precedence", () => {
@@ -79,6 +93,71 @@ test("derives a masked activity summary from tool content", () => {
     type: "tool", tool: "Bash", state: "running", input: "TOKEN=sk-secret-value"
   } });
   assert.deepEqual(projection?.activity, { kind: "tool", name: "Bash", state: "running", summary: "TOKEN=[REDACTED]" });
+});
+
+test("terminal message errors fail the session while isolated tool errors remain active detail", () => {
+  const failed = projectSession(validSession, projectRoot, {
+    parts: [{ type: "text", state: "error", error: "model stopped" }]
+  });
+  assert.equal(failed?.status.primary, "failed");
+  assert.equal(failed?.activity, null);
+
+  const toolError = projectSession(validSession, projectRoot, {
+    parts: [{ type: "tool", tool: "Bash", state: "error" }]
+  });
+  assert.equal(toolError?.status.primary, "waiting_for_system");
+  assert.deepEqual(toolError?.activity, { kind: "tool", name: "Bash", state: "error", summary: null });
+
+  assert.equal(projectSession(validSession, projectRoot, { parts: [{ type: "text", error: null }] })?.status.primary, "waiting_for_system");
+});
+
+test("session.error events are projected as failed without letting later activity revive them", async () => {
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/global/health") return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (path === "/doc") return jsonResponse({});
+      if (path === "/session") return jsonResponse([validSession]);
+      if (path === "/session/status") return jsonResponse({ [validSession.id]: "idle" });
+      if (path === `/session/${validSession.id}`) return jsonResponse(validSession);
+      if (path === `/session/${validSession.id}/message`) return jsonResponse([
+        { parts: [{ type: "text", state: "error", error: "old failure" }] },
+        { parts: [{ type: "tool", tool: "Bash", state: "running" }] }
+      ]);
+      return jsonResponse({}, 404);
+    }
+  });
+
+  await adapter.connect();
+  assert.equal(adapter.snapshot[0]?.status.primary, "failed");
+  await adapter.consumeEvent(JSON.stringify({ type: "session.error", properties: { sessionID: validSession.id, error: "fatal" } }));
+  assert.equal(adapter.snapshot[0]?.status.primary, "failed");
+  assert.equal(adapter.snapshot[0]?.activity, null);
+});
+
+test("authoritative success replaces an earlier event-derived failure", async () => {
+  let status = "idle";
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/global/health") return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (path === "/doc") return jsonResponse({});
+      if (path === "/session") return jsonResponse([validSession]);
+      if (path === "/session/status") return jsonResponse({ [validSession.id]: status });
+      if (path === `/session/${validSession.id}`) return jsonResponse(validSession);
+      if (path === `/session/${validSession.id}/message`) return jsonResponse([]);
+      return jsonResponse({}, 404);
+    }
+  });
+
+  await adapter.connect();
+  await adapter.consumeEvent(JSON.stringify({ type: "session.error", properties: { sessionID: validSession.id } }));
+  assert.equal(adapter.snapshot[0]?.status.primary, "failed");
+  status = "completed";
+  await adapter.reconcile();
+  assert.equal(adapter.snapshot[0]?.status.primary, "completed");
 });
 
 test("preserves stale freshness and activity independently of primary status", () => {
@@ -211,6 +290,71 @@ test("parse failures trigger reconciliation and retain stale projections if reco
   assert.equal(adapter.snapshot[0]?.status.primary, "waiting_for_system");
 });
 
+test("reconnect reconciles before reopening SSE and restores freshness", async () => {
+  const states: string[] = [];
+  const freshness: string[] = [];
+  const order: string[] = [];
+  let sourceCalls = 0;
+  let fail = false;
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    sse: async () => {
+      sourceCalls += 1;
+      order.push(`sse-${sourceCalls}`);
+      if (sourceCalls === 1) return (async function* () { fail = true; throw new Error("incomplete frame"); })();
+      return (async function* () { await new Promise<void>((resolve) => setImmediate(resolve)); })();
+    },
+    retry: { baseDelayMs: 0, maxDelayMs: 0, slowDelayMs: 0, sleep: async () => { fail = false; }, random: () => 0 },
+    onProjectionUpdate: (snapshot) => freshness.push(snapshot[0]?.status.freshness ?? "none"),
+    onOperationalState: (state) => states.push(state),
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/session") order.push(`snapshot-${sourceCalls}`);
+      if (path === "/global/health") return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (path === "/doc") return jsonResponse({});
+      if (path === "/session") return fail ? jsonResponse({}, 503) : jsonResponse([validSession]);
+      if (path === "/session/status") return jsonResponse({ [validSession.id]: "idle" });
+      if (path === `/session/${validSession.id}`) return jsonResponse(validSession);
+      if (path === `/session/${validSession.id}/message`) return jsonResponse([]);
+      return jsonResponse({}, 404);
+    }
+  });
+  await adapter.connect();
+  await waitFor(() => states.includes("reconnecting"));
+  await waitFor(() => states.filter((state) => state === "connected").length > 1);
+  assert.equal(adapter.snapshot[0]?.status.freshness, "fresh");
+  assert.ok(freshness.includes("stale"));
+  assert.equal(order.indexOf("snapshot-0") < order.indexOf("sse-1"), true);
+  assert.equal(order.indexOf("snapshot-1") < order.indexOf("sse-2"), true);
+  assert.ok(states.includes("reconnecting"));
+  assert.ok(states.includes("connected"));
+  await adapter.stop();
+});
+
+test("reconnects with bounded jitter then enters the slower retry loop", async () => {
+  const delays: number[] = [];
+  let sourceCalls = 0;
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    sse: async () => {
+      sourceCalls += 1;
+      throw new Error("offline");
+    },
+    retry: { baseDelayMs: 10, maxDelayMs: 20, slowDelayMs: 100, rapidFailureLimit: 2, random: () => 0.5, sleep: async (delay) => { delays.push(delay); if (delays.length >= 4) await adapter.stop(); } },
+    fetch: async (url) => {
+      if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (String(url).endsWith("/doc")) return jsonResponse({});
+      if (String(url).endsWith("/session")) return jsonResponse([]);
+      if (String(url).endsWith("/session/status")) return jsonResponse({});
+      return jsonResponse({}, 404);
+    }
+  });
+  await adapter.connect();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sourceCalls, 4);
+  assert.deepEqual(delays, [15, 30, 150, 150]);
+});
+
 test("successful reconciliation publishes only the authoritative project snapshot", async () => {
   const updates: SessionProjection[][] = [];
   let includeSession = true;
@@ -314,6 +458,32 @@ test("native SSE source validates content type and parses event frames", async (
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(new TextEncoder().encode('data: {"type":"session.updated"}\n\n'));
+      controller.close();
+    }
+  });
+  const source = nativeSseSource(async () => new Response(body, { headers: { "content-type": "text/event-stream" } }));
+  const frames: unknown[] = [];
+  for await (const frame of await source("http://opencode.test", new AbortController().signal)) frames.push(frame);
+  assert.deepEqual(frames, [{ type: "session.updated" }]);
+});
+
+test("native SSE source rejects incomplete frames", async () => {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"session.updated"}'));
+      controller.close();
+    }
+  });
+  const source = nativeSseSource(async () => new Response(body, { headers: { "content-type": "text/event-stream" } }));
+  await assert.rejects(async () => {
+    for await (const _frame of await source("http://opencode.test", new AbortController().signal)) {}
+  }, /incomplete frame/);
+});
+
+test("native SSE source ignores comment heartbeats", async () => {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(": keepalive\n\ndata: {\"type\":\"session.updated\"}\n\n"));
       controller.close();
     }
   });
