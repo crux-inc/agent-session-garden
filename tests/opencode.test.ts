@@ -81,6 +81,7 @@ test("terminal message errors fail the session while isolated tool errors remain
   });
   assert.equal(toolError?.status.primary, "waiting_for_system");
   assert.deepEqual(toolError?.activity, { kind: "tool", name: "Bash", state: "error", summary: null });
+
 });
 
 test("session.error events are projected as failed without letting later activity revive them", async () => {
@@ -93,12 +94,16 @@ test("session.error events are projected as failed without letting later activit
       if (path === "/session") return jsonResponse([validSession]);
       if (path === "/session/status") return jsonResponse({ [validSession.id]: "idle" });
       if (path === `/session/${validSession.id}`) return jsonResponse(validSession);
-      if (path === `/session/${validSession.id}/message`) return jsonResponse([]);
+      if (path === `/session/${validSession.id}/message`) return jsonResponse([
+        { parts: [{ type: "text", state: "error", error: "old failure" }] },
+        { parts: [{ type: "tool", tool: "Bash", state: "running" }] }
+      ]);
       return jsonResponse({}, 404);
     }
   });
 
   await adapter.connect();
+  assert.equal(adapter.snapshot[0]?.status.primary, "tool_calling");
   await adapter.consumeEvent(JSON.stringify({ type: "session.error", properties: { sessionID: validSession.id, error: "fatal" } }));
   assert.equal(adapter.snapshot[0]?.status.primary, "failed");
   assert.equal(adapter.snapshot[0]?.activity, null);
