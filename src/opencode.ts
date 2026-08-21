@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { SessionProjection } from "./projection.js";
-import { projectSession } from "./projection.js";
+import { projectSession, terminalMessageErrorOf } from "./projection.js";
 
 export type FetchLike = typeof fetch;
 export type OperationalState = "connected" | "reconnecting" | "stale" | "unsupported_version";
@@ -128,6 +128,7 @@ export class OpenCodeAdapter {
         const contradictoryIdentity = detail?.id !== id && detail?.sessionID !== id;
         const authoritative = contradictoryIdentity ? { ...session } : { ...session, ...(detail && typeof detail === "object" ? detail : {}), id };
         const statusResult = statusFor(statuses, id);
+        if (statusResult.value?.match(/^(completed|success|failed|error)$/i)) this.sessionErrors.delete(id);
         const observed = {
           ...observationFromMessages(messages),
           status: statusResult.value,
@@ -315,7 +316,7 @@ function observationFromMessages(messages: any): Record<string, unknown> {
   const latest = list.at(-1);
   const parts = Array.isArray(latest?.parts) ? latest.parts : latest?.part ? [latest.part] : [];
   return {
-    ...(allParts.some((part: any) => part && typeof part === "object" && part.type !== "tool" && (part.state === "error" || part.status === "error" || part.status === "failed")) ? { terminalMessageError: true } : {}),
+    ...(terminalMessageErrorOf({ parts: allParts }) ? { terminalMessageError: true } : {}),
     ...(parts.length > 0 ? { parts } : {}),
     ...(latest && typeof latest === "object" ? latest : {})
   };
