@@ -82,6 +82,8 @@ test("terminal message errors fail the session while isolated tool errors remain
   assert.equal(toolError?.status.primary, "waiting_for_system");
   assert.deepEqual(toolError?.activity, { kind: "tool", name: "Bash", state: "error", summary: null });
 
+  assert.equal(projectSession(validSession, projectRoot, { parts: [{ type: "text", error: null }] })?.status.primary, "waiting_for_system");
+
 });
 
 test("session.error events are projected as failed without letting later activity revive them", async () => {
@@ -103,7 +105,7 @@ test("session.error events are projected as failed without letting later activit
   });
 
   await adapter.connect();
-  assert.equal(adapter.snapshot[0]?.status.primary, "tool_calling");
+  assert.equal(adapter.snapshot[0]?.status.primary, "failed");
   await adapter.consumeEvent(JSON.stringify({ type: "session.error", properties: { sessionID: validSession.id, error: "fatal" } }));
   assert.equal(adapter.snapshot[0]?.status.primary, "failed");
   assert.equal(adapter.snapshot[0]?.activity, null);

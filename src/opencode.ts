@@ -311,9 +311,11 @@ function normalizeStatus(status: any): string | undefined {
 
 function observationFromMessages(messages: any): Record<string, unknown> {
   const list = Array.isArray(messages) ? messages : Array.isArray(messages?.messages) ? messages.messages : [];
+  const allParts = list.flatMap((message: any) => Array.isArray(message?.parts) ? message.parts : message?.part ? [message.part] : []);
   const latest = list.at(-1);
   const parts = Array.isArray(latest?.parts) ? latest.parts : latest?.part ? [latest.part] : [];
   return {
+    ...(allParts.some((part: any) => part && typeof part === "object" && part.type !== "tool" && (part.state === "error" || part.status === "error" || part.status === "failed")) ? { terminalMessageError: true } : {}),
     ...(parts.length > 0 ? { parts } : {}),
     ...(latest && typeof latest === "object" ? latest : {})
   };
