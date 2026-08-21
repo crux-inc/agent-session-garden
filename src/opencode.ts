@@ -16,6 +16,14 @@ export type OpenCodeOptions = {
   onProjectionUpdate?: (snapshot: SessionProjection[]) => void;
   onOperationalState?: (state: OperationalState, message?: string) => void;
   autoStartOwned?: boolean;
+  retry?: {
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    slowDelayMs?: number;
+    rapidFailureLimit?: number;
+    random?: () => number;
+    sleep?: (milliseconds: number) => Promise<void>;
+  };
 };
 
 const EVENT_TYPES = new Set([
@@ -47,7 +55,10 @@ async function* parseSse(reader: ReadableStreamDefaultReader<Uint8Array>): Async
       buffer = records.pop() ?? "";
       for (const record of records) {
         const data = record.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
-        if (!data) throw new Error("OpenCode SSE frame has no data");
+        if (!data) {
+          if (record.split(/\r?\n/).every((line) => line.trim() === "" || line.startsWith(":"))) continue;
+          throw new Error("OpenCode SSE frame has no data");
+        }
         const event = JSON.parse(data) as SseFrame;
         if (!event || typeof event.type !== "string") throw new Error("OpenCode SSE frame has an invalid event type");
         yield event;
@@ -72,6 +83,7 @@ export class OpenCodeAdapter {
   private readonly update?: (snapshot: SessionProjection[]) => void;
   private readonly stateUpdate?: (state: OperationalState, message?: string) => void;
   private readonly autoStartOwned: boolean;
+  private readonly retry: Required<NonNullable<OpenCodeOptions["retry"]>>;
   private readonly explicitBaseUrl: boolean;
   private child: ChildProcess | null = null;
   private streamAbort: AbortController | null = null;
@@ -94,6 +106,14 @@ export class OpenCodeAdapter {
     this.update = options.onProjectionUpdate;
     this.stateUpdate = options.onOperationalState;
     this.autoStartOwned = options.autoStartOwned ?? false;
+    this.retry = {
+      baseDelayMs: options.retry?.baseDelayMs ?? 100,
+      maxDelayMs: options.retry?.maxDelayMs ?? 5000,
+      slowDelayMs: options.retry?.slowDelayMs ?? 10000,
+      rapidFailureLimit: options.retry?.rapidFailureLimit ?? 5,
+      random: options.retry?.random ?? Math.random,
+      sleep: options.retry?.sleep ?? sleep
+    };
   }
 
   get owned(): boolean { return this.child !== null; }
@@ -141,7 +161,6 @@ export class OpenCodeAdapter {
       if (sequence !== this.refreshSequence || this.stopped) return;
       this.projections = next;
       this.publish();
-      this.stateUpdate?.("connected");
     } catch (error) {
       this.markStale(error instanceof Error ? error.message : String(error));
       throw error;
@@ -247,13 +266,16 @@ export class OpenCodeAdapter {
   }
 
   private async observe(): Promise<void> {
-    let delay = 100;
+    let failures = 0;
+    let reconciled = false;
     while (!this.stopped) {
       try {
+        if (!reconciled) {
+          await this.reconcile();
+          reconciled = true;
+        }
         this.streamAbort = new AbortController();
         const stream = await this.source!(this.baseUrl, this.streamAbort.signal);
-        await this.reconcile();
-        delay = 100;
         this.stateUpdate?.("connected");
         for await (const event of stream) {
           if (this.stopped) return;
@@ -262,14 +284,23 @@ export class OpenCodeAdapter {
             await this.reconcile().catch(() => undefined);
           }
           else this.log(`Ignoring unknown OpenCode event ${event.type}`);
+          failures = 0;
         }
         if (!this.stopped) throw new Error("OpenCode SSE stream ended");
       } catch (error) {
         if (this.stopped) return;
         this.markStale(error instanceof Error ? error.message : String(error));
+        try {
+          await this.reconcile();
+          reconciled = true;
+        } catch {
+          reconciled = false;
+        }
+        failures += 1;
         this.stateUpdate?.("reconnecting", "OpenCode observation is reconnecting");
-        await sleep(delay + Math.floor(Math.random() * delay));
-        delay = Math.min(delay * 2, 5000);
+        const exponential = Math.min(this.retry.baseDelayMs * (2 ** (failures - 1)), this.retry.maxDelayMs);
+        const delay = failures > this.retry.rapidFailureLimit ? Math.max(exponential, this.retry.slowDelayMs) : exponential;
+        await this.retry.sleep(delay + Math.floor(this.retry.random() * delay));
       } finally {
         this.streamAbort = null;
       }

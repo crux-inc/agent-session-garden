@@ -39,6 +39,14 @@ test("reports actionable operational failures through health", async () => {
   } finally { await server.stop(); }
 });
 
+test("health exposes adapter connection state separately from Garden server readiness", async () => {
+  const server = new GardenServer({ projectRoot: "/tmp/project", adapter: { snapshot: [] } as never, operationalState: "stale", operationalMessage: "reconciliation unavailable" });
+  await server.start();
+  try {
+    assert.deepEqual(await fetch(`${server.url}/api/health`).then((response) => response.json()), { ready: false, server: "ready", state: "stale", message: "reconciliation unavailable", reconciliation: "stale", adapter: "stale" });
+  } finally { await server.stop(); }
+});
+
 test("an occupied explicit port fails without selecting another port", async () => {
   const first = new GardenServer({ projectRoot: "/tmp/project", port: 0 });
   await first.start();
