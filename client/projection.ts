@@ -43,6 +43,7 @@ export function scenePosition(sessionId: string, status: PrimaryStatus): { x: nu
 }
 
 export type CharacterView = SessionProjection & { position: { x: number; y: number }; homeSeat: { x: number; y: number }; location: string; appearance: { coat: string; hair: string } };
+export const activityLabel = (activity: SessionProjection["activity"]): string => activity ? `${activity.kind} / ${activity.name ?? "unnamed"} / ${activity.state ?? "unknown"}${activity.summary ? ` / ${activity.summary}` : ""}` : "none";
 export function characterViews(sessions: SessionProjection[]): CharacterView[] {
   return sessions.map((session) => ({ ...session, position: scenePosition(session.sessionId, session.status.primary), homeSeat: homeSeat(session.sessionId), location: locationFor(session.status.primary), appearance: appearanceFor(session) }));
 }

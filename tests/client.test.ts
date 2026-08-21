@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appearanceFor, archiveSessions, characterViews, homeSeat, locationFor, ProjectionState, roleForAgent, scenePosition, ARCHIVE_LIMIT } from "../client/projection.js";
+import { activityLabel, appearanceFor, archiveSessions, characterViews, homeSeat, locationFor, ProjectionState, roleForAgent, scenePosition, ARCHIVE_LIMIT } from "../client/projection.js";
 import type { SessionProjection } from "../src/projection.js";
 
 const session = (id: string, status: SessionProjection["status"]["primary"] = "coding"): SessionProjection => ({
@@ -45,4 +45,9 @@ test("keeps completed and failed archives separate and bounded to recent session
   assert.equal(archiveSessions([...sessions, failed], "completed").length, ARCHIVE_LIMIT);
   assert.equal(archiveSessions([...sessions, failed], "completed").some((item) => item.sessionId === "failed"), false);
   assert.deepEqual(archiveSessions([...sessions, failed], "failed").map((item) => item.sessionId), ["failed"]);
+});
+
+test("formats activity detail for the browser panel", () => {
+  assert.equal(activityLabel({ kind: "tool", name: "Bash", state: "running", summary: "command" }), "tool / Bash / running / command");
+  assert.equal(activityLabel(null), "none");
 });

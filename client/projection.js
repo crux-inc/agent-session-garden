@@ -23,6 +23,7 @@ export function scenePosition(sessionId, status) {
 export function characterViews(sessions) {
   return sessions.map((session) => ({ ...session, position: scenePosition(session.sessionId, session.status.primary), homeSeat: homeSeat(session.sessionId), location: locationFor(session.status.primary), appearance: appearanceFor(session) }));
 }
+export const activityLabel = (activity) => activity ? `${activity.kind} / ${activity.name ?? "unnamed"} / ${activity.state ?? "unknown"}${activity.summary ? ` / ${activity.summary}` : ""}` : "none";
 export class ProjectionState {
   snapshot = { schemaVersion: 1, project: { root: "" }, sessions: [] };
   applySnapshot(snapshot) { if (snapshot.schemaVersion === 1) this.snapshot = snapshot; }
