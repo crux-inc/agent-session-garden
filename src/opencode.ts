@@ -157,8 +157,6 @@ export class OpenCodeAdapter {
           status: statusResult.value,
           invalid: contradictoryIdentity || statusResult.malformed,
           ...(this.sessionErrors.has(id) && !statusResult.value?.match(/^(completed|success|failed|error)$/i) ? { sessionError: true } : {})
-          invalid: contradictoryIdentity || statusResult.malformed,
-          ...(this.sessionErrors.has(id) && !statusResult.value?.match(/^(completed|success|failed|error)$/i) ? { sessionError: true } : {})
         };
         const projection = projectSession(authoritative, this.projectRoot, observed);
         if (projection) next.set(projection.sessionId, projection);
