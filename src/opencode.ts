@@ -81,6 +81,7 @@ export class OpenCodeAdapter {
   private refreshPending = false;
   private refreshSequence = 0;
   private projections = new Map<string, SessionProjection>();
+  private sessionErrors = new Set<string>();
 
   constructor(options: OpenCodeOptions) {
     this.explicitBaseUrl = options.baseUrl !== undefined;
@@ -130,7 +131,8 @@ export class OpenCodeAdapter {
         const observed = {
           ...observationFromMessages(messages),
           status: statusResult.value,
-          invalid: contradictoryIdentity || statusResult.malformed
+          invalid: contradictoryIdentity || statusResult.malformed,
+          ...(this.sessionErrors.has(id) && !statusResult.value?.match(/^(completed|success|failed|error)$/i) ? { sessionError: true } : {})
         };
         const projection = projectSession(authoritative, this.projectRoot, observed);
         if (projection) next.set(projection.sessionId, projection);
@@ -209,6 +211,11 @@ export class OpenCodeAdapter {
       if (!EVENT_TYPES.has(event.type)) {
         this.log(`Ignoring unknown OpenCode event ${event.type}`);
         return null;
+      }
+      if (event.type === "session.error") {
+        const properties = event.properties && typeof event.properties === "object" ? event.properties as Record<string, unknown> : {};
+        const sessionId = typeof properties.sessionID === "string" ? properties.sessionID : typeof properties.sessionId === "string" ? properties.sessionId : typeof properties.id === "string" ? properties.id : undefined;
+        if (sessionId) this.sessionErrors.add(sessionId);
       }
       await this.reconcile();
       return this.snapshot;
