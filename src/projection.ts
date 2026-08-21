@@ -36,7 +36,7 @@ type Activity = NonNullable<SessionProjection["activity"]>;
 
 const partsOf = (raw: any): any[] => Array.isArray(raw?.parts) ? raw.parts : raw?.part ? [raw.part] : raw && typeof raw === "object" ? [raw] : [];
 
-const terminalMessageErrorOf = (raw: any): boolean => partsOf(raw).some((part) => {
+export const terminalMessageErrorOf = (raw: any): boolean => partsOf(raw).some((part) => {
   if (!part || typeof part !== "object" || part.type === "tool") return false;
   return part.state === "error" || part.status === "error" || part.status === "failed";
 });
