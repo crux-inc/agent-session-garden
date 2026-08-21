@@ -13,6 +13,7 @@ export type SessionProjection = {
 };
 export type ProjectionSnapshot = { schemaVersion: 1; project: { root: string }; sessions: SessionProjection[] };
 export const ARCHIVE_LIMIT = 12;
+export const ACTIVE_LIMIT = 5;
 
 export const roleForAgent = (agent: string): GardenRole => agent === "build" ? "builder" : agent === "plan" ? "planner" : "generic";
 
@@ -45,8 +46,12 @@ export function scenePosition(sessionId: string, status: PrimaryStatus): { x: nu
 
 export type CharacterView = SessionProjection & { position: { x: number; y: number }; homeSeat: { x: number; y: number }; location: string; appearance: { coat: string; hair: string } };
 export const activityLabel = (activity: SessionProjection["activity"]): string => activity ? `${activity.kind} / ${activity.name ?? "unnamed"} / ${activity.state ?? "unknown"}${activity.summary ? ` / ${activity.summary}` : ""}` : "none";
+const ACTIVE_SEATS = [{ x: 29, y: 31 }, { x: 50, y: 31 }, { x: 71, y: 31 }, { x: 29, y: 63 }, { x: 50, y: 63 }];
+export function activeSessions(sessions: SessionProjection[]): SessionProjection[] {
+  return sessions.filter((session) => !isArchived(session.status.primary)).sort((a, b) => b.status.changedAt.localeCompare(a.status.changedAt) || a.sessionId.localeCompare(b.sessionId)).slice(0, ACTIVE_LIMIT);
+}
 export function characterViews(sessions: SessionProjection[]): CharacterView[] {
-  return sessions.map((session) => ({ ...session, position: scenePosition(session.sessionId, session.status.primary), homeSeat: homeSeat(session.sessionId), location: locationFor(session.status.primary), appearance: appearanceFor(session) }));
+  return activeSessions(sessions).map((session, index) => ({ ...session, position: ACTIVE_SEATS[index]!, homeSeat: homeSeat(session.sessionId), location: locationFor(session.status.primary), appearance: appearanceFor(session) }));
 }
 
 export function archiveSessions(sessions: SessionProjection[], status: "completed" | "failed"): SessionProjection[] {
