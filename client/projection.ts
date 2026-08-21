@@ -25,7 +25,7 @@ export function appearanceFor(session: Pick<SessionProjection, "agent" | "model"
 
 const ARCHIVED = new Set<PrimaryStatus>(["completed", "failed"]);
 export const isArchived = (status: PrimaryStatus): boolean => ARCHIVED.has(status);
-export const locationFor = (status: PrimaryStatus): string => isArchived(status) ? `${status} archive` : status === "researching" ? "bookshelf" : status === "tool_calling" ? "computer" : status.startsWith("waiting") ? "waiting area" : "desk";
+export const locationFor = (status: PrimaryStatus): string => isArchived(status) ? `${status} archive` : status === "researching" ? "bookshelf" : status === "tool_calling" ? "computer" : status === "waiting_for_permission" ? "permission desk" : status === "waiting_for_user" ? "question desk" : status.startsWith("waiting") ? "waiting area" : "desk";
 
 export function homeSeat(sessionId: string): { x: number; y: number } {
   let hash = 0;
@@ -38,7 +38,8 @@ export function scenePosition(sessionId: string, status: PrimaryStatus): { x: nu
   if (isArchived(status)) return { x: 24 + (Math.abs(home.x * 3) % 45), y: 72 };
   if (status === "researching") return { x: 80, y: 48 };
   if (status === "tool_calling") return { x: 76, y: 26 };
-  if (status.startsWith("waiting")) return { x: 83, y: 72 };
+  if (status === "waiting_for_permission") return { x: 83, y: 65 };
+  if (status === "waiting_for_user") return { x: 83, y: 82 };
   return home;
 }
 

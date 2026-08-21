@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { SessionProjection } from "./projection.js";
-import { projectSession, terminalMessageErrorOf } from "./projection.js";
+import { mask, projectSession, terminalMessageErrorOf } from "./projection.js";
 
 export type FetchLike = typeof fetch;
 export type OperationalState = "connected" | "reconnecting" | "stale" | "unsupported_version";
@@ -29,7 +29,8 @@ export type OpenCodeOptions = {
 const EVENT_TYPES = new Set([
   "session.created", "session.updated", "session.deleted", "session.status",
   "message.updated", "message.removed", "message.part.updated", "message.part.removed",
-  "permission.asked", "permission.replied", "session.error"
+  "permission.asked", "permission.replied", "question.asked", "question.replied",
+  "input.asked", "input.replied", "session.error"
 ]);
 
 const sleep = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -94,6 +95,7 @@ export class OpenCodeAdapter {
   private refreshSequence = 0;
   private projections = new Map<string, SessionProjection>();
   private sessionErrors = new Set<string>();
+  private readonly pendingRequests = new Map<string, Map<string, { kind: "permission" | "question"; name: string | null; summary: string | null }>>();
 
   constructor(options: OpenCodeOptions) {
     this.explicitBaseUrl = options.baseUrl !== undefined;
@@ -151,6 +153,7 @@ export class OpenCodeAdapter {
         if (statusResult.value?.match(/^(completed|success|failed|error)$/i)) this.sessionErrors.delete(id);
         const observed = {
           ...observationFromMessages(messages),
+          ...this.pendingObservation(id),
           status: statusResult.value,
           invalid: contradictoryIdentity || statusResult.malformed,
           ...(this.sessionErrors.has(id) && !statusResult.value?.match(/^(completed|success|failed|error)$/i) ? { sessionError: true } : {})
@@ -233,6 +236,7 @@ export class OpenCodeAdapter {
         return null;
       }
       this.rememberSessionError(event);
+      this.applyWaitingEvent(event);
       await this.reconcile();
       return this.snapshot;
     } catch (error) {
@@ -281,6 +285,7 @@ export class OpenCodeAdapter {
           if (this.stopped) return;
           if (EVENT_TYPES.has(event.type)) {
             this.rememberSessionError(event);
+            this.applyWaitingEvent(event);
             await this.reconcile().catch(() => undefined);
           }
           else this.log(`Ignoring unknown OpenCode event ${event.type}`);
@@ -324,6 +329,44 @@ export class OpenCodeAdapter {
     return response.json();
   }
 
+  private pendingObservation(sessionId: string): Record<string, unknown> {
+    const requests = [...(this.pendingRequests.get(sessionId)?.values() ?? [])];
+    const permission = requests.find((request) => request.kind === "permission");
+    const question = requests.find((request) => request.kind === "question");
+    const activity = permission ?? question;
+    return activity ? {
+      ...(permission ? { permission: true } : {}),
+      ...(question ? { question: true } : {}),
+      parts: [{ type: activity.kind, name: activity.name, state: "pending", summary: activity.summary }]
+    } : {};
+  }
+
+  private applyWaitingEvent(event: SseFrame): void {
+    if (event.type === "session.deleted") {
+      const properties = event.properties && typeof event.properties === "object" ? event.properties as Record<string, any> : {};
+      const sessionId = textValue(properties.sessionID) ?? textValue(properties.sessionId) ?? textValue(properties.id);
+      if (sessionId) this.pendingRequests.delete(sessionId);
+      return;
+    }
+    if (!event.properties || typeof event.properties !== "object") return;
+    const properties = event.properties as Record<string, any>;
+    const sessionId = textValue(properties.sessionID) ?? textValue(properties.sessionId) ?? textValue(properties.session?.id);
+    const kind = event.type.startsWith("permission.") ? "permission" : event.type.startsWith("question.") || event.type.startsWith("input.") ? "question" : null;
+    if (!sessionId || !kind) return;
+    const requestId = textValue(properties[`${kind}ID`]) ?? (kind === "question" ? textValue(properties.inputID) : null) ?? textValue(properties.requestID) ?? textValue(properties.id);
+    if (!requestId) return;
+    const requests = this.pendingRequests.get(sessionId) ?? new Map();
+    if (event.type.endsWith(".asked")) {
+      requests.set(`${kind}:${requestId}`, { kind, name: textValue(properties.name), summary: mask(textValue(properties.summary)) });
+      this.pendingRequests.set(sessionId, requests);
+      return;
+    }
+    if (event.type.endsWith(".replied")) {
+      requests.delete(`${kind}:${requestId}`);
+      if (requests.size === 0) this.pendingRequests.delete(sessionId);
+    }
+  }
+
 }
 
 function statusFor(statuses: any, id: string): { value?: string; present: boolean; malformed: boolean } {
@@ -340,6 +383,8 @@ function normalizeStatus(status: any): string | undefined {
   if (!status || typeof status !== "object") return undefined;
   return typeof status.status === "string" ? status.status : typeof status.type === "string" ? status.type : undefined;
 }
+
+const textValue = (value: unknown): string | null => typeof value === "string" && value.trim().length > 0 ? value : null;
 
 function observationFromMessages(messages: any): Record<string, unknown> {
   const list = Array.isArray(messages) ? messages : Array.isArray(messages?.messages) ? messages.messages : [];

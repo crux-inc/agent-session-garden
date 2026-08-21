@@ -380,6 +380,58 @@ test("unknown events do not reconcile, while allowlisted events publish a snapsh
   assert.equal(sessionRequests, initialRequests + 1);
 });
 
+test("tracks permission and question waits by session and clears only matching replies", async () => {
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    fetch: async (url) => {
+      if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (String(url).endsWith("/doc")) return jsonResponse({});
+      if (String(url).endsWith("/session")) return jsonResponse([validSession]);
+      if (String(url).endsWith("/session/status")) return jsonResponse({ [validSession.id]: "idle" });
+      if (String(url).endsWith(`/session/${validSession.id}`)) return jsonResponse(validSession);
+      if (String(url).endsWith(`/session/${validSession.id}/message`)) return jsonResponse([]);
+      return jsonResponse({}, 404);
+    }
+  });
+  await adapter.connect();
+  await adapter.consumeEvent(JSON.stringify({ type: "question.asked", properties: { sessionID: validSession.id, questionID: "q-1", summary: "password=secret" } }));
+  assert.equal(adapter.snapshot[0]?.status.primary, "waiting_for_user");
+  assert.deepEqual(adapter.snapshot[0]?.activity, { kind: "question", name: null, state: "pending", summary: "password=[REDACTED]" });
+  await adapter.consumeEvent(JSON.stringify({ type: "permission.asked", properties: { sessionID: validSession.id, permissionID: "p-1", name: "filesystem", summary: "token=secret" } }));
+  assert.equal(adapter.snapshot[0]?.status.primary, "waiting_for_permission");
+  assert.equal(adapter.snapshot[0]?.activity?.summary, "token=[REDACTED]");
+  await adapter.consumeEvent(JSON.stringify({ type: "permission.replied", properties: { sessionID: validSession.id, permissionID: "wrong" } }));
+  assert.equal(adapter.snapshot[0]?.status.primary, "waiting_for_permission");
+  await adapter.consumeEvent(JSON.stringify({ type: "permission.replied", properties: { sessionID: validSession.id, permissionID: "p-1" } }));
+  assert.equal(adapter.snapshot[0]?.status.primary, "waiting_for_user");
+  await adapter.consumeEvent(JSON.stringify({ type: "question.replied", properties: { sessionID: validSession.id, questionID: "q-1" } }));
+  assert.equal(adapter.snapshot[0]?.status.primary, "waiting_for_system");
+});
+
+test("records waiting requests received through the live SSE stream", async () => {
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    sse: async (_url, signal) => (async function* () {
+      yield { type: "permission.asked", properties: { sessionID: validSession.id, permissionID: "p-live", summary: "token=secret" } };
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    })(),
+    fetch: async (url) => {
+      if (String(url).endsWith("/global/health")) return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (String(url).endsWith("/doc")) return jsonResponse({});
+      if (String(url).endsWith("/session")) return jsonResponse([validSession]);
+      if (String(url).endsWith("/session/status")) return jsonResponse({ [validSession.id]: "idle" });
+      if (String(url).endsWith(`/session/${validSession.id}`)) return jsonResponse(validSession);
+      if (String(url).endsWith(`/session/${validSession.id}/message`)) return jsonResponse([]);
+      return jsonResponse({}, 404);
+    }
+  });
+  await adapter.connect();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(adapter.snapshot[0]?.status.primary, "waiting_for_permission");
+  assert.equal(adapter.snapshot[0]?.activity?.summary, "token=[REDACTED]");
+  await adapter.stop();
+});
+
 test("stale transitions publish through the snapshot interface and isolate callback errors", async () => {
   const states: string[] = [];
   const logs: string[] = [];

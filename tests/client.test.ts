@@ -25,11 +25,16 @@ test("derives stable appearance and home seat from complete identity", () => {
 test("maps status to office location while retaining home-based position", () => {
   assert.equal(locationFor("researching"), "bookshelf");
   assert.equal(locationFor("tool_calling"), "computer");
-  assert.equal(locationFor("waiting_for_permission"), "waiting area");
+  assert.equal(locationFor("waiting_for_permission"), "permission desk");
+  assert.equal(locationFor("waiting_for_user"), "question desk");
   assert.equal(locationFor("completed"), "completed archive");
   assert.equal(characterViews([session("one", "researching")])[0]?.location, "bookshelf");
   assert.deepEqual(characterViews([session("one", "researching")])[0]?.homeSeat, homeSeat("one"));
   assert.notDeepEqual(scenePosition("one", "researching"), homeSeat("one"));
+});
+
+test("gives permission and user waiting states separate scene positions", () => {
+  assert.notDeepEqual(scenePosition("one", "waiting_for_permission"), scenePosition("one", "waiting_for_user"));
 });
 
 test("applies a complete snapshot and replaces matching projection updates", () => {
