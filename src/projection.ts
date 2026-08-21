@@ -36,6 +36,11 @@ type Activity = NonNullable<SessionProjection["activity"]>;
 
 const partsOf = (raw: any): any[] => Array.isArray(raw?.parts) ? raw.parts : raw?.part ? [raw.part] : raw && typeof raw === "object" ? [raw] : [];
 
+const terminalMessageErrorOf = (raw: any): boolean => partsOf(raw).some((part) => {
+  if (!part || typeof part !== "object" || part.type === "tool") return false;
+  return part.state === "error" || part.error !== undefined || part.status === "error" || part.status === "failed";
+});
+
 const activityOf = (raw: any): Activity | null => {
   const activity = (part: any): Activity | null => {
     if (!part || typeof part !== "object") return null;
@@ -74,7 +79,7 @@ export function projectSession(raw: any, projectRoot: string, observed?: any, fr
   let primary: PrimaryStatus = "waiting_for_system";
   if (invalid) primary = "unknown";
   else if (statusValue === "completed" || statusValue === "success") primary = "completed";
-  else if (statusValue === "failed" || statusValue === "error" || observed?.error || observed?.terminalError || observed?.sessionError || observed?.terminalMessageError) primary = "failed";
+  else if (statusValue === "failed" || statusValue === "error" || observed?.error || observed?.terminalError || observed?.sessionError || observed?.terminalMessageError || terminalMessageErrorOf(observed)) primary = "failed";
   else if (observed?.permission === true || observed?.permission?.state === "pending" || (currentActivity?.kind === "permission" && currentActivity.state === "pending")) primary = "waiting_for_permission";
   else if (observed?.question === true || observed?.question?.state === "pending" || (currentActivity?.kind === "question" && currentActivity.state === "pending")) primary = "waiting_for_user";
   else if (researchTool(currentActivity)) primary = "researching";

@@ -39,6 +39,15 @@ test("status policy preserves terminal status over transient activity", () => {
   assert.equal(projection?.activity, null);
 });
 
+test("terminal projections receive their authoritative end time", () => {
+  const completed = projectSession({ ...validSession, status: "completed", updatedAt: "2026-08-20T01:02:03.000Z" }, projectRoot, { part: { type: "tool", tool: "Bash", state: "running" } });
+  assert.equal(completed?.status.primary, "completed");
+  assert.equal(completed?.lifetime.endedAt, "2026-08-20T01:02:03.000Z");
+
+  const failed = projectSession({ ...validSession, status: "failed", time: { updated: "2026-08-20T02:03:04.000Z" } }, projectRoot);
+  assert.equal(failed?.lifetime.endedAt, "2026-08-20T02:03:04.000Z");
+});
+
 test("applies complete deterministic status precedence", () => {
   const cases: Array<[string, any, string]> = [
     ["permission wins over question and tools", { permission: true, question: true, parts: [{ type: "tool", tool: "Bash", state: "running" }] }, "waiting_for_permission"],
@@ -58,6 +67,65 @@ test("selects research detail before generic tools and retains tool errors witho
   assert.equal(projection?.status.primary, "researching");
   assert.deepEqual(projection?.activity, { kind: "tool", name: "WebFetch", state: "running", summary: "url=https://example.test" });
   assert.equal(projectSession(validSession, projectRoot, { part: { type: "tool", tool: "Bash", state: "error" } })?.status.primary, "waiting_for_system");
+});
+
+test("terminal message errors fail the session while isolated tool errors remain active detail", () => {
+  const failed = projectSession(validSession, projectRoot, {
+    parts: [{ type: "text", state: "error", error: "model stopped" }]
+  });
+  assert.equal(failed?.status.primary, "failed");
+  assert.equal(failed?.activity, null);
+
+  const toolError = projectSession(validSession, projectRoot, {
+    parts: [{ type: "tool", tool: "Bash", state: "error" }]
+  });
+  assert.equal(toolError?.status.primary, "waiting_for_system");
+  assert.deepEqual(toolError?.activity, { kind: "tool", name: "Bash", state: "error", summary: null });
+});
+
+test("session.error events are projected as failed without letting later activity revive them", async () => {
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/global/health") return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (path === "/doc") return jsonResponse({});
+      if (path === "/session") return jsonResponse([validSession]);
+      if (path === "/session/status") return jsonResponse({ [validSession.id]: "idle" });
+      if (path === `/session/${validSession.id}`) return jsonResponse(validSession);
+      if (path === `/session/${validSession.id}/message`) return jsonResponse([]);
+      return jsonResponse({}, 404);
+    }
+  });
+
+  await adapter.connect();
+  await adapter.consumeEvent(JSON.stringify({ type: "session.error", properties: { sessionID: validSession.id, error: "fatal" } }));
+  assert.equal(adapter.snapshot[0]?.status.primary, "failed");
+  assert.equal(adapter.snapshot[0]?.activity, null);
+});
+
+test("authoritative success replaces an earlier event-derived failure", async () => {
+  let status = "idle";
+  const adapter = new OpenCodeAdapter({
+    projectRoot,
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/global/health") return jsonResponse({ healthy: true, version: "1.18.18" });
+      if (path === "/doc") return jsonResponse({});
+      if (path === "/session") return jsonResponse([validSession]);
+      if (path === "/session/status") return jsonResponse({ [validSession.id]: status });
+      if (path === `/session/${validSession.id}`) return jsonResponse(validSession);
+      if (path === `/session/${validSession.id}/message`) return jsonResponse([]);
+      return jsonResponse({}, 404);
+    }
+  });
+
+  await adapter.connect();
+  await adapter.consumeEvent(JSON.stringify({ type: "session.error", properties: { sessionID: validSession.id } }));
+  assert.equal(adapter.snapshot[0]?.status.primary, "failed");
+  status = "completed";
+  await adapter.reconcile();
+  assert.equal(adapter.snapshot[0]?.status.primary, "completed");
 });
 
 test("preserves stale freshness and activity independently of primary status", () => {
