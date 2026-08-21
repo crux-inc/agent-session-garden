@@ -35,28 +35,35 @@ function role(agent: string) { return agent === "build" ? "builder" : agent === 
 type Activity = NonNullable<SessionProjection["activity"]>;
 
 const partsOf = (raw: any): any[] => Array.isArray(raw?.parts) ? raw.parts : raw?.part ? [raw.part] : raw && typeof raw === "object" ? [raw] : [];
+const activeState = (state: Activity["state"]): boolean => state === "pending" || state === "running";
+const isResearchToolName = (name: string | null): boolean => /webfetch|search|research|browser|crawl|fetch/i.test(name ?? "");
+const activityState = (part: any): Activity["state"] => ["pending", "running", "completed", "error"].includes(part.state) ? part.state : null;
+const activitySummary = (part: any): string | null => mask([part.summary, part.text, part.input, part.output, part.result].find(text) ?? null);
 
 const activityOf = (raw: any): Activity | null => {
   const activity = (part: any): Activity | null => {
     if (!part || typeof part !== "object") return null;
-    const state = ["pending", "running", "completed", "error"].includes(part.state) ? part.state : null;
-    if (part.type === "tool" || text(part.tool)) return { kind: "tool", name: text(part.tool) ? part.tool : null, state, summary: mask(text(part.summary) ? part.summary : null) };
-    if (part.type === "permission") return { kind: "permission", name: text(part.name) ? part.name : null, state, summary: mask(text(part.summary) ? part.summary : null) };
-    if (part.type === "question" || part.type === "input") return { kind: "question", name: text(part.name) ? part.name : null, state, summary: mask(text(part.summary) ? part.summary : null) };
-    if (part.type === "text" && state === "running") return { kind: "message", name: null, state, summary: mask(text(part.text) ? part.text : null) };
+    const state = activityState(part);
+    if (part.type === "tool" || text(part.tool)) return { kind: "tool", name: text(part.tool) ? part.tool : null, state, summary: activitySummary(part) };
+    if (part.type === "permission") return { kind: "permission", name: text(part.name) ? part.name : null, state, summary: activitySummary(part) };
+    if (part.type === "question" || part.type === "input") return { kind: "question", name: text(part.name) ? part.name : null, state, summary: activitySummary(part) };
+    if (part.type === "text" || part.type === "message" || part.type === "generation" || /write|edit|patch|code/i.test(String(part.type ?? part.operation ?? ""))) return { kind: "message", name: text(part.operation) ? part.operation : null, state, summary: activitySummary(part) };
     return null;
   };
   const candidates = partsOf(raw).map(activity).filter((value): value is Activity => value !== null);
   return candidates.find((value) => value.kind === "permission")
     ?? candidates.find((value) => value.kind === "question")
-    ?? candidates.find((value) => value.kind === "tool" && /webfetch|search|research/i.test(value.name ?? ""))
+    ?? candidates.find((value) => value.kind === "tool" && activeState(value.state) && isResearchToolName(value.name))
+    ?? candidates.find((value) => value.kind === "tool" && activeState(value.state))
+    ?? candidates.find((value) => value.kind === "message" && activeState(value.state))
+    ?? candidates.find((value) => value.kind === "tool" && isResearchToolName(value.name))
     ?? candidates.find((value) => value.kind === "tool")
     ?? candidates.find((value) => value.kind === "message")
     ?? null;
 };
 
-const activeTool = (activity: Activity | null): boolean => activity?.kind === "tool" && (activity.state === "pending" || activity.state === "running");
-const researchTool = (activity: Activity | null): boolean => activity?.kind === "tool" && (activity.state === "pending" || activity.state === "running") && /webfetch|search|research/i.test(activity.name ?? "");
+const activeTool = (activity: Activity | null): boolean => activity?.kind === "tool" && activeState(activity.state);
+const researchTool = (activity: Activity | null): boolean => activity?.kind === "tool" && activeState(activity.state) && isResearchToolName(activity.name);
 const activeSignal = (value: unknown): boolean => value === true || (typeof value === "string" && /pending|running|active|generat|writing|editing|patch/i.test(value));
 export function projectSession(raw: any, projectRoot: string, observed?: any, freshness: "fresh" | "stale" = "fresh", previous?: SessionProjection): SessionProjection | null {
   const id = raw?.id ?? raw?.sessionID;
@@ -79,7 +86,7 @@ export function projectSession(raw: any, projectRoot: string, observed?: any, fr
   else if (observed?.question === true || observed?.question?.state === "pending" || (currentActivity?.kind === "question" && currentActivity.state === "pending")) primary = "waiting_for_user";
   else if (researchTool(currentActivity)) primary = "researching";
   else if (activeTool(currentActivity)) primary = "tool_calling";
-  else if (activeSignal(observed?.generating) || activeSignal(observed?.writing) || activeSignal(observed?.editing) || activeSignal(observed?.patching) || currentActivity?.kind === "message") primary = "coding";
+  else if (activeSignal(observed?.generating) || activeSignal(observed?.writing) || activeSignal(observed?.editing) || activeSignal(observed?.patching) || (currentActivity?.kind === "message" && activeState(currentActivity.state))) primary = "coding";
   const stale = freshness === "stale" && previous;
   if (stale) return { ...previous, status: { ...previous.status, freshness: "stale" } };
   const changedAt = previous?.status.primary === primary ? previous.status.changedAt : new Date().toISOString();

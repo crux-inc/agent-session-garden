@@ -60,6 +60,27 @@ test("selects research detail before generic tools and retains tool errors witho
   assert.equal(projectSession(validSession, projectRoot, { part: { type: "tool", tool: "Bash", state: "error" } })?.status.primary, "waiting_for_system");
 });
 
+test("infers research, tool calling, and coding from current message parts", () => {
+  assert.equal(projectSession(validSession, projectRoot, { parts: [
+    { type: "tool", tool: "Bash", state: "running" },
+    { type: "tool", tool: "SearchDocs", state: "running", input: "query=projection" }
+  ] })?.status.primary, "researching");
+  assert.equal(projectSession(validSession, projectRoot, { parts: [{ type: "tool", tool: "Bash", state: "pending" }] })?.status.primary, "tool_calling");
+  assert.equal(projectSession(validSession, projectRoot, { parts: [{ type: "text", text: "writing", state: "running" }] })?.status.primary, "coding");
+  assert.equal(projectSession(validSession, projectRoot, { parts: [{ type: "patch", state: "running" }] })?.status.primary, "coding");
+  assert.equal(projectSession(validSession, projectRoot, { parts: [
+    { type: "tool", tool: "Bash", state: "completed" },
+    { type: "generation", state: "running", text: "writing code" }
+  ] })?.status.primary, "coding");
+});
+
+test("derives a masked activity summary from tool content", () => {
+  const projection = projectSession(validSession, projectRoot, { part: {
+    type: "tool", tool: "Bash", state: "running", input: "TOKEN=sk-secret-value"
+  } });
+  assert.deepEqual(projection?.activity, { kind: "tool", name: "Bash", state: "running", summary: "TOKEN=[REDACTED]" });
+});
+
 test("preserves stale freshness and activity independently of primary status", () => {
   const fresh = projectSession(validSession, projectRoot, { part: { type: "tool", tool: "Bash", state: "running" } });
   const stale = projectSession(validSession, projectRoot, { invalid: true }, "stale", fresh ?? undefined);
