@@ -38,7 +38,7 @@ const partsOf = (raw: any): any[] => Array.isArray(raw?.parts) ? raw.parts : raw
 
 const terminalMessageErrorOf = (raw: any): boolean => partsOf(raw).some((part) => {
   if (!part || typeof part !== "object" || part.type === "tool") return false;
-  return part.state === "error" || part.error !== undefined || part.status === "error" || part.status === "failed";
+  return part.state === "error" || part.status === "error" || part.status === "failed";
 });
 
 const activityOf = (raw: any): Activity | null => {
